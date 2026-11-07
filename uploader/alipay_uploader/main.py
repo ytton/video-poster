@@ -13,6 +13,7 @@ from patchright.async_api import Page, Playwright, TimeoutError as PWTimeoutErro
 
 from conf import BASE_DIR, LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
 from uploader.base_video import BaseVideoUploader
+from uploader.manual_review import wait_for_manual_review
 from utils.base_social_media import set_init_script
 from utils.log import alipay_logger
 from utils.login_qrcode import build_login_qrcode_path
@@ -277,6 +278,7 @@ class AlipayVideo(BaseVideoUploader):
         collection_name: str | None = None,
         debug: bool = True,
         headless: bool = LOCAL_CHROME_HEADLESS,
+        prepare_only: bool = False,
     ):
         self.title = title
         self.file_path = file_path
@@ -287,6 +289,7 @@ class AlipayVideo(BaseVideoUploader):
         self.collection_name = collection_name
         self.debug = debug
         self.headless = headless
+        self.prepare_only = prepare_only
         self.local_executable_path = LOCAL_CHROME_PATH
         self.max_title_length = 30
 
@@ -691,6 +694,11 @@ class AlipayVideo(BaseVideoUploader):
             await self.apply_collection(page)
             await self.check_ai_label(page)
             await self.wait_for_upload_complete(page)
+            if self.prepare_only:
+                await context.storage_state(path=self.account_file)
+                print("SAU_PREPARED_FOR_REVIEW", flush=True)
+                await wait_for_manual_review(page, browser)
+                return
             await self.submit_publish(page)
 
             await context.storage_state(path=self.account_file)

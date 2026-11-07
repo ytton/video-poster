@@ -39,6 +39,7 @@ def register(platform_parsers):
     instagram_video.add_argument("--title", required=True)
     instagram_video.add_argument("--desc", default="")
     instagram_video.add_argument("--tags", default="")
+    instagram_video.add_argument("--prepare-only", action="store_true", help="Fill the upload page and wait for manual review without publishing")
     instagram_video.add_argument("--proxy", default=INSTAGRAM_PROXY, help="代理地址；不传时直连")
     instagram_video.add_argument("--result", type=Path)
     add_runtime_flags(instagram_video)
@@ -76,6 +77,7 @@ class InstagramUploadRequest:
     proxy: str | None = INSTAGRAM_PROXY
     headless: bool = False
     result_file: Path | None = None
+    prepare_only: bool = False
 
 
 async def login_instagram_account(account_name: str, *, headless: bool = False, proxy: str | None = INSTAGRAM_PROXY) -> dict:
@@ -101,6 +103,7 @@ async def upload_instagram_content(request: InstagramUploadRequest) -> dict:
         proxy=request.proxy,
         headless=request.headless,
         result_file=request.result_file,
+        prepare_only=request.prepare_only,
     )
     return await app.upload()
 
@@ -127,8 +130,9 @@ async def run(args):
             image_files=parse_image_files(args.images) if args.action == "upload-note" else None,
             thumbnail=args.thumbnail if args.action == "upload-video" else None,
             proxy=args.proxy,
-            headless=args.headless,
+            headless=False if getattr(args, "prepare_only", False) else args.headless,
             result_file=args.result,
+            prepare_only=getattr(args, "prepare_only", False),
         )
         result = await upload_instagram_content(request)
         print(json.dumps(result, ensure_ascii=False, indent=2))

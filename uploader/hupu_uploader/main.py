@@ -26,6 +26,7 @@ from patchright.async_api import BrowserContext, Page, Playwright, async_playwri
 
 from conf import BASE_DIR, LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
 from uploader.base_video import BaseVideoUploader
+from uploader.manual_review import wait_for_manual_review
 from utils.log import hupu_logger
 
 
@@ -310,6 +311,7 @@ class HuPuVideo(BaseVideoUploader):
         thumbnail_path: str | None = None,
         debug: bool = True,
         headless: bool = LOCAL_CHROME_HEADLESS,
+        prepare_only: bool = False,
     ):
         self.title = title
         self.file_path = file_path
@@ -320,6 +322,7 @@ class HuPuVideo(BaseVideoUploader):
         self.thumbnail_path = thumbnail_path
         self.debug = debug
         self.headless = headless
+        self.prepare_only = prepare_only
         self.local_executable_path = LOCAL_CHROME_PATH
         self.max_title_length = 40
         self.min_title_length = 4
@@ -370,6 +373,12 @@ class HuPuVideo(BaseVideoUploader):
 
             # 6) 选择原创/二创 + AI 声明
             await self._check_declarations(page)
+
+            if self.prepare_only:
+                await context.storage_state(path=self.account_file)
+                print("SAU_PREPARED_FOR_REVIEW", flush=True)
+                await wait_for_manual_review(page, browser)
+                return
 
             # 7) 点击发布
             await self._submit_publish(page)

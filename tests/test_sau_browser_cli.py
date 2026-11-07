@@ -1,4 +1,5 @@
 import sau_commands.douyin
+import sau_commands.kuaishou
 import sau_commands.tencent
 import sau_commands.xiaohongshu
 import asyncio
@@ -102,6 +103,34 @@ class BrowserCliParserTests(unittest.TestCase):
         self.assertFalse(request.debug)
         self.assertFalse(request.headless)
         self.assertIsNone(request.declaration)
+
+    def test_douyin_prepare_only_opens_browser_and_reaches_uploader(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            video_path = Path(tmp_dir) / "demo.mp4"
+            video_path.write_bytes(b"video")
+            args = sau_cli.build_parser().parse_args([
+                "douyin", "upload-video", "--account", "creator",
+                "--file", str(video_path), "--title", "标题", "--prepare-only",
+            ])
+        with patch("sau_commands.douyin.upload_video", new=AsyncMock()) as mock_upload:
+            asyncio.run(sau_cli.dispatch(args))
+        request = mock_upload.await_args.args[0]
+        self.assertTrue(request.prepare_only)
+        self.assertFalse(request.headless)
+
+    def test_kuaishou_prepare_only_opens_browser_and_reaches_uploader(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            video_path = Path(tmp_dir) / "demo.mp4"
+            video_path.write_bytes(b"video")
+            args = sau_cli.build_parser().parse_args([
+                "kuaishou", "upload-video", "--account", "creator",
+                "--file", str(video_path), "--title", "标题", "--prepare-only",
+            ])
+        with patch("sau_commands.kuaishou.upload_kuaishou_video", new=AsyncMock()) as mock_upload:
+            asyncio.run(sau_cli.dispatch(args))
+        request = mock_upload.await_args.args[0]
+        self.assertTrue(request.prepare_only)
+        self.assertFalse(request.headless)
 
     def test_tencent_upload_video_accepts_dual_thumbnail_aspects(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

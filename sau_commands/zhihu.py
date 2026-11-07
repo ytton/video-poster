@@ -93,7 +93,7 @@ async def run(args):
             topics=[], video_mark=args.video_mark, show_options=args.show_options,
             originality=args.originality, schedule=args.schedule,
             prepare_only=args.prepare_only, upload_timeout=args.upload_timeout,
-            headless=args.headless, debug=args.debug,
+            headless=False if args.prepare_only else args.headless, debug=args.debug,
         )
         result = await app.main()
     print(json.dumps(result, ensure_ascii=False, indent=2))

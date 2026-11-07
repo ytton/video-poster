@@ -52,6 +52,7 @@ def register(platform_parsers):
         help="Exact Douyin self-declaration option text; omitted means do not set one",
     )
     upload_video_parser.add_argument("--collection", default=None, help="Optional collection name to add the work into (must already exist)")
+    upload_video_parser.add_argument("--prepare-only", action="store_true", help="Fill the upload page and leave it open without clicking Publish")
     add_runtime_flags(upload_video_parser)
 
     upload_note_parser = douyin_actions.add_parser("upload-note", help="Upload one note to Douyin")
@@ -84,6 +85,7 @@ class DouyinVideoUploadRequest:
     headless: bool = True
     declaration: str | None = None
     collection_name: str | None = None
+    prepare_only: bool = False
 
 
 @dataclass(slots=True)
@@ -140,6 +142,7 @@ async def upload_video(request: DouyinVideoUploadRequest) -> Path:
         debug=request.debug,
         headless=request.headless,
         collection_name=request.collection_name,
+        prepare_only=request.prepare_only,
     )
     await app.douyin_upload_video()
     return account_file
@@ -201,11 +204,15 @@ async def run(args):
             declaration=args.declaration,
             publish_strategy=publish_strategy,
             debug=args.debug,
-            headless=args.headless,
             collection_name=args.collection,
+            prepare_only=getattr(args, "prepare_only", False),
+            headless=False if getattr(args, "prepare_only", False) else args.headless,
         )
         await upload_video(request)
-        print(f"Douyin video upload submitted: {request.video_file}")
+        if request.prepare_only:
+            print(f"Douyin review window closed: {request.video_file}")
+        else:
+            print(f"Douyin video upload submitted: {request.video_file}")
         return 0
 
     if args.action == "upload-note":

@@ -16,6 +16,7 @@ from patchright.async_api import Page, async_playwright, expect
 
 from conf import LOCAL_CHROME_PATH
 from uploader.base_video import BaseVideoUploader
+from uploader.manual_review import wait_for_manual_review
 from uploader.dayu_uploader.publication import submit_dayu_publication
 from uploader.dayu_uploader.schedule import fill_dayu_schedule, validate_dayu_schedule
 from uploader.dayu_uploader.session import DAYU_VIDEO_URL, load_dayu_identity, read_dayu_identity
@@ -214,7 +215,10 @@ class DayuVideo(BaseVideoUploader):
                 await wait_dayu_processing(page, self.file_path.name, self.upload_timeout)
                 if self.prepare_only:
                     await page.screenshot(path=str(result_file.with_suffix(".png")), full_page=True)
-                    result.update(success=True, status="prepared")
+                    result.update(success=False, status="prepared")
+                    await context.storage_state(path=str(self.account_file))
+                    print("SAU_PREPARED_FOR_REVIEW", flush=True)
+                    await wait_for_manual_review(page, browser)
                     return result
 
                 await submit_dayu_publication(page, result, result_file)

@@ -32,6 +32,7 @@ def register(platform_parsers):
     weibo_upload_video_parser.add_argument("--tags", default="", help="Comma-separated tags, such as tag1,tag2")
     weibo_upload_video_parser.add_argument("--thumbnail", type=existing_file_path, help="Optional cover image path (<5MB)")
     weibo_upload_video_parser.add_argument("--collection", default=None, help="Optional collection name")
+    weibo_upload_video_parser.add_argument("--prepare-only", action="store_true", help="Fill the upload page and wait for manual review without publishing")
     add_runtime_flags(weibo_upload_video_parser)
 
 
@@ -46,6 +47,7 @@ class WeiboVideoUploadRequest:
     collection_name: str | None = None
     debug: bool = True
     headless: bool = True
+    prepare_only: bool = False
 
 
 async def login_weibo_account(account_name: str, headless: bool = True, qrcode_callback=None) -> dict:
@@ -78,6 +80,7 @@ async def upload_weibo_video(request: WeiboVideoUploadRequest) -> Path:
         collection_name=request.collection_name,
         debug=request.debug,
         headless=request.headless,
+        prepare_only=request.prepare_only,
     )
     await app.main()
     return account_file
@@ -107,10 +110,11 @@ async def run(args):
             thumbnail_file=args.thumbnail,
             collection_name=args.collection,
             debug=args.debug,
-            headless=args.headless,
+            headless=False if getattr(args, "prepare_only", False) else args.headless,
+            prepare_only=getattr(args, "prepare_only", False),
         )
         await upload_weibo_video(request)
-        print(f"Weibo video upload submitted: {request.video_file}")
+        print(f"Weibo review window closed: {request.video_file}" if request.prepare_only else f"Weibo video upload submitted: {request.video_file}")
         return 0
 
     raise RuntimeError(f"Unsupported Weibo action: {args.action}")

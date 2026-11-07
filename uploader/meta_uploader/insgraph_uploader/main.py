@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 from patchright.async_api import Locator, Page, Playwright, TimeoutError as BrowserTimeoutError, async_playwright, expect
+from uploader.manual_review import wait_for_manual_review
 
 INSTAGRAM_HOME_URL = "https://www.instagram.com/"
 # 未配置环境变量或 --proxy 时使用系统直连。
@@ -156,7 +157,8 @@ class InstagramUploader:
     def __init__(self, account_file: str | Path, *, title: str, description: str = '', tags: list[str] | None = None,
                  video_file: str | Path | None = None, image_files: list[str | Path] | None = None,
                  thumbnail: str | Path | None = None,
-                 proxy: str | None = None, headless: bool = False, result_file: str | Path | None = None):
+                 proxy: str | None = None, headless: bool = False, result_file: str | Path | None = None,
+                 prepare_only: bool = False):
         self.account_file = Path(account_file)
         self.title, self.description = title.strip(), description.strip()
         self.tags = [t.strip().lstrip('#') for t in (tags or []) if t.strip().lstrip('#')]
@@ -170,6 +172,7 @@ class InstagramUploader:
         if not self.title:
             raise ValueError('标题不能为空')
         self.proxy, self.headless = proxy, headless
+        self.prepare_only = prepare_only
         self.result_file = Path(result_file) if result_file else Path('.local/instagram-results') / f'{uuid4().hex}.json'
         self.result = {'platform': 'instagram', 'title': self.title, 'status': 'not_submitted'}
         self.stage = 'validation'
@@ -201,7 +204,7 @@ class InstagramUploader:
             await navigation_popups.nth(1).click()
         finally:
             await page.remove_locator_handler(notifications)
-        dialog = page.get_by_role('dialog')
+        dialog = page.get_by_role('dialog').filter(has=page.locator(INSTAGRAM_MEDIA_INPUT))
         await expect(dialog).to_have_count(1)
         file_input = dialog.locator(INSTAGRAM_MEDIA_INPUT)
         await expect(file_input).to_have_count(1)
@@ -213,6 +216,7 @@ class InstagramUploader:
             reels_intro = page.get_by_role('dialog').filter(
                 has=page.locator('img[src^="/images/instagram/clips/reels_nux_icon.png"]'))
             await _dismiss_optional_prompt(reels_intro, reels_intro.locator('._a9-z div > button'))
+        await _dismiss_optional_prompt(notifications, notification_buttons.nth(1))
         # 裁剪标题栏主动作实际出现，才可推进；上传失败或未知弹窗阻断会保留现场并报错。
         await expect(dialog.locator(INSTAGRAM_PRIMARY_ACTION)).to_have_count(1, timeout=60_000)
 
@@ -256,9 +260,8 @@ class InstagramUploader:
         # data-lexical-editor 标识真实正文编辑器，限定当前创建弹窗，排除评论输入框。
         await expect(dialog.locator('[contenteditable="true"][role="textbox"][data-lexical-editor="true"]')).to_have_count(1)
 
-    async def _publish(self, page: Page, identity: dict) -> None:
-        """先登记最终响应监听再分享，响应不明时记录 unknown 且不重发。"""
-        # 配文页独有 Lexical 编辑器；标题栏唯一主动作此时是分享，不使用翻译后的按钮名称。
+    async def _fill_caption(self, page: Page):
+        """填写配文并确认最终分享按钮已就绪。"""
         dialog = page.get_by_role('dialog')
         editor = dialog.locator('[contenteditable="true"][role="textbox"][data-lexical-editor="true"]')
         caption = self._caption()
@@ -267,6 +270,11 @@ class InstagramUploader:
         action = dialog.locator(INSTAGRAM_PRIMARY_ACTION)
         await expect(action).to_have_count(1)
         await expect(action).to_be_enabled()
+        return action, caption
+
+    async def _publish(self, page: Page, identity: dict) -> None:
+        """先登记最终响应监听再分享，响应不明时记录 unknown 且不重发。"""
+        action, caption = await self._fill_caption(page)
         self.result.update(identity, status='submission_unknown')
         self.result_file.parent.mkdir(parents=True, exist_ok=True)
         self.result_file.write_text(json.dumps(self.result, ensure_ascii=False, indent=2), encoding='utf-8')
@@ -325,6 +333,15 @@ class InstagramUploader:
                 await self._upload_files(page)
                 self.stage = 'edit'
                 await self._advance_media_editor(page)
+                if self.prepare_only:
+                    await self._fill_caption(page)
+                    await context.storage_state(path=str(self.account_file))
+                    self.result.update(identity, status='prepared')
+                    self.result_file.parent.mkdir(parents=True, exist_ok=True)
+                    self.result_file.write_text(json.dumps(self.result, ensure_ascii=False, indent=2), encoding='utf-8')
+                    print("SAU_PREPARED_FOR_REVIEW", flush=True)
+                    await wait_for_manual_review(page, browser)
+                    return self.result
                 self.stage = 'publish'
                 await self._publish(page, identity)
                 self.stage = 'save_session'

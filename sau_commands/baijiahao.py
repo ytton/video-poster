@@ -36,6 +36,7 @@ def register(platform_parsers):
     baijiahao_upload_video_parser.add_argument("--tags", default="", help="Comma-separated tags, such as tag1,tag2")
     baijiahao_upload_video_parser.add_argument("--thumbnail", type=existing_file_path, help="Optional cover image path")
     baijiahao_upload_video_parser.add_argument("--collection", default=None, help="Optional collection name")
+    baijiahao_upload_video_parser.add_argument("--prepare-only", action="store_true", help="Fill the upload page and wait for manual review without publishing")
     add_runtime_flags(baijiahao_upload_video_parser)
 
 
@@ -50,6 +51,7 @@ class BaijiahaoVideoUploadRequest:
     collection_name: str | None = None
     debug: bool = True
     headless: bool = True
+    prepare_only: bool = False
 
 
 async def login_baijiahao_account(account_name: str, headless: bool = True, qrcode_callback=None) -> dict:
@@ -82,6 +84,7 @@ async def upload_baijiahao_video(request: BaijiahaoVideoUploadRequest) -> Path:
         collection_name=request.collection_name,
         debug=request.debug,
         headless=request.headless,
+        prepare_only=request.prepare_only,
     )
     await app.main()
     return account_file
@@ -111,10 +114,11 @@ async def run(args):
             thumbnail_file=args.thumbnail,
             collection_name=args.collection,
             debug=args.debug,
-            headless=args.headless,
+            headless=False if getattr(args, "prepare_only", False) else args.headless,
+            prepare_only=getattr(args, "prepare_only", False),
         )
         await upload_baijiahao_video(request)
-        print(f"Baijiahao video upload submitted: {request.video_file}")
+        print(f"Baijiahao review window closed: {request.video_file}" if request.prepare_only else f"Baijiahao video upload submitted: {request.video_file}")
         return 0
 
     raise RuntimeError(f"Unsupported Baijiahao action: {args.action}")

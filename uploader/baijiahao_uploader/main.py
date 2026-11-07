@@ -20,6 +20,7 @@ from patchright.async_api import Page, Playwright, TimeoutError as PWTimeoutErro
 
 from conf import BASE_DIR, LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
 from uploader.base_video import BaseVideoUploader
+from uploader.manual_review import wait_for_manual_review
 from utils.log import baijiahao_logger
 from utils.login_qrcode import build_login_qrcode_path, decode_qrcode_from_path, print_terminal_qrcode, remove_qrcode_file
 
@@ -240,6 +241,7 @@ class BaiJiaHaoVideo(BaseVideoUploader):
         collection_name: str | None = None,
         debug: bool = True,
         headless: bool = LOCAL_CHROME_HEADLESS,
+        prepare_only: bool = False,
     ):
         self.title = title
         self.file_path = file_path
@@ -251,6 +253,7 @@ class BaiJiaHaoVideo(BaseVideoUploader):
         self.collection_name = collection_name
         self.debug = debug
         self.headless = headless
+        self.prepare_only = prepare_only
         self.local_executable_path = LOCAL_CHROME_PATH
         self.max_title_length = 30
 
@@ -312,6 +315,12 @@ class BaiJiaHaoVideo(BaseVideoUploader):
 
             # 7) 选择合集（如有配置）
             await self._apply_collection(page)
+
+            if self.prepare_only:
+                await context.storage_state(path=self.account_file)
+                print("SAU_PREPARED_FOR_REVIEW", flush=True)
+                await wait_for_manual_review(page, browser)
+                return
 
             # 8) 点击发布
             await self._submit_publish(page)

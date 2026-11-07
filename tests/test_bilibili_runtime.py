@@ -5,6 +5,7 @@ from unittest.mock import Mock, patch
 from uploader.bilibili_uploader.runtime import (
     build_biliup_runtime_path,
     ensure_biliup_binary,
+    fallback_cli_release,
     run_biliup_command,
 )
 
@@ -13,6 +14,23 @@ class BiliupRuntimeTests(unittest.TestCase):
     def test_build_biliup_runtime_path_returns_platform_path(self):
         path = build_biliup_runtime_path("Windows")
         self.assertTrue(str(path).endswith("biliup.exe"))
+
+    @patch("uploader.bilibili_uploader.runtime.platform.machine", return_value="AMD64")
+    @patch("uploader.bilibili_uploader.runtime.platform.system", return_value="Windows")
+    def test_fallback_cli_release_points_to_windows_archive(self, _system, _machine):
+        release = fallback_cli_release()
+        self.assertEqual(release["asset_name"], "biliupR-v1.3.4-x86_64-windows.zip")
+        self.assertTrue(release["asset_url"].endswith(release["asset_name"]))
+
+    @patch("uploader.bilibili_uploader.runtime.fetch_latest_release", side_effect=RuntimeError("rate limited"))
+    def test_ensure_biliup_binary_uses_fallback_when_latest_unavailable(self, _fetch):
+        with patch("uploader.bilibili_uploader.runtime.build_biliup_runtime_path", return_value=Path("missing-biliup.exe")):
+            with patch("pathlib.Path.exists", return_value=False):
+                with patch("uploader.bilibili_uploader.runtime.fallback_cli_release", return_value={"tag_name": "v1.3.4", "asset_name": "biliupR.zip", "asset_url": "https://example.invalid/biliupR.zip"}):
+                    with patch("uploader.bilibili_uploader.runtime.download_biliup_asset") as download:
+                        with patch("uploader.bilibili_uploader.runtime.write_local_biliup_version"):
+                            ensure_biliup_binary(force_check=True)
+        download.assert_called_once()
 
     @patch("uploader.bilibili_uploader.runtime.fetch_latest_release")
     def test_ensure_biliup_binary_downloads_when_missing(self, mock_release):

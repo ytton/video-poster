@@ -43,6 +43,7 @@ def register(platform_parsers):
     xiaohongshu_upload_video_parser.add_argument("--tags", default="", help="Comma-separated tags, such as tag1,tag2")
     xiaohongshu_upload_video_parser.add_argument("--schedule", type=schedule_value, help=f"Schedule time in {schedule_help}")
     xiaohongshu_upload_video_parser.add_argument("--thumbnail", type=existing_file_path, help="Optional thumbnail path")
+    xiaohongshu_upload_video_parser.add_argument("--prepare-only", action="store_true", help="Fill the upload page and wait for manual review without publishing")
     add_runtime_flags(xiaohongshu_upload_video_parser)
 
     xiaohongshu_upload_note_parser = xiaohongshu_actions.add_parser("upload-note", help="Upload one note to Xiaohongshu")
@@ -67,6 +68,7 @@ class XiaohongshuVideoUploadRequest:
     publish_strategy: str = XIAOHONGSHU_PUBLISH_STRATEGY_IMMEDIATE
     debug: bool = True
     headless: bool = True
+    prepare_only: bool = False
 
 
 @dataclass(slots=True)
@@ -113,6 +115,7 @@ async def upload_xiaohongshu_video(request: XiaohongshuVideoUploadRequest) -> Pa
         publish_strategy=request.publish_strategy,
         debug=request.debug,
         headless=request.headless,
+        prepare_only=request.prepare_only,
     )
     await app.main()
     return account_file
@@ -175,10 +178,11 @@ async def run(args):
             thumbnail_file=args.thumbnail,
             publish_strategy=publish_strategy,
             debug=args.debug,
-            headless=args.headless,
+            headless=False if getattr(args, "prepare_only", False) else args.headless,
+            prepare_only=getattr(args, "prepare_only", False),
         )
         await upload_xiaohongshu_video(request)
-        print(f"Xiaohongshu video upload submitted: {request.video_file}")
+        print(f"Xiaohongshu review window closed: {request.video_file}" if request.prepare_only else f"Xiaohongshu video upload submitted: {request.video_file}")
         return 0
 
     if args.action == "upload-note":

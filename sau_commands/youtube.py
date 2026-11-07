@@ -37,6 +37,7 @@ def register(platform_parsers):
     youtube_upload_video_parser.add_argument(
         "--visibility", default="public", choices=["public", "unlisted", "private"], help="Video visibility")
     youtube_upload_video_parser.add_argument("--schedule", type=schedule_value, help=f"Schedule time in {schedule_help}")
+    youtube_upload_video_parser.add_argument("--prepare-only", action="store_true", help="Fill the upload page and wait for manual review without publishing")
     add_runtime_flags(youtube_upload_video_parser)
 
 
@@ -53,6 +54,7 @@ class YouTubeVideoUploadRequest:
     schedule: datetime | int = 0
     debug: bool = True
     headless: bool = False
+    prepare_only: bool = False
 
 
 async def login_youtube_account(account_name: str, headless: bool = False) -> dict:
@@ -86,6 +88,7 @@ async def upload_youtube_video(request: YouTubeVideoUploadRequest) -> Path:
         visibility=request.visibility,
         debug=request.debug,
         headless=request.headless,
+        prepare_only=request.prepare_only,
     )
     app.set_publish_date(request.schedule)
     await app.main()
@@ -118,10 +121,11 @@ async def run(args):
             visibility=args.visibility,
             schedule=args.schedule or 0,
             debug=args.debug,
-            headless=args.headless,
+            headless=False if getattr(args, "prepare_only", False) else args.headless,
+            prepare_only=getattr(args, "prepare_only", False),
         )
         await upload_youtube_video(request)
-        print(f"YouTube video upload submitted: {request.video_file}")
+        print(f"YouTube review window closed: {request.video_file}" if request.prepare_only else f"YouTube video upload submitted: {request.video_file}")
         return 0
 
     raise RuntimeError(f"Unsupported YouTube action: {args.action}")

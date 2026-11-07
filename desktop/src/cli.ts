@@ -39,6 +39,20 @@ export async function prepareVideoPreview(path: string): Promise<string> {
   return inDesktop ? invoke<string>("prepare_video_preview", { path }) : path
 }
 
+export async function hashVideoFile(path: string): Promise<{ sha256: string; bytes: number; filePath: string }> {
+  if (!inDesktop) throw new Error("请在桌面程序中识别视频文件")
+  return invoke("hash_video_file", { path })
+}
+
+export async function prepareCoverPreview(path: string): Promise<string> {
+  return inDesktop ? invoke<string>("prepare_cover_preview", { path }) : path
+}
+
+export async function saveCoverFrame(orientation: "landscape" | "portrait", blob: Blob): Promise<string> {
+  if (!inDesktop) throw new Error("请在桌面程序中截取封面")
+  return invoke<string>("save_cover_frame", { orientation, bytes: Array.from(new Uint8Array(await blob.arrayBuffer())) })
+}
+
 export async function onCliLine(handler: (payload: TaskLineEvent) => void): Promise<UnlistenFn> {
   return listen<TaskLineEvent>("cli-line", event => handler(event.payload))
 }

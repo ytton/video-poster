@@ -9,7 +9,7 @@ export function buildArgs(platform: string, action: CliNode, values: FormValues)
   const args = [platform, action.name]
   for (const option of action.options) {
     if (option.name === "headless") {
-      if (values.headed === true && option.flags.includes("--headed")) args.push("--headed")
+      if (option.flags.includes("--headed")) args.push("--headed")
       continue
     }
     const value = values[option.name]

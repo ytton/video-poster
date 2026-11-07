@@ -13,6 +13,7 @@ from patchright.async_api import async_playwright
 
 from conf import DEBUG_MODE, LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
 from uploader.base_video import BaseVideoUploader
+from uploader.manual_review import wait_for_manual_review
 from utils.base_social_media import set_init_script
 from utils.login_qrcode import build_login_qrcode_path
 from utils.login_qrcode import decode_qrcode_from_path
@@ -534,6 +535,7 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
         publish_strategy: str = XIAOHONGSHU_PUBLISH_STRATEGY_IMMEDIATE,
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
+        prepare_only: bool = False,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -547,6 +549,7 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
         self.tags = tags or []
         self.thumbnail_path = thumbnail_path
         self.desc = desc or ""
+        self.prepare_only = prepare_only
 
     async def validate_upload_args(self):
         await self.validate_base_args()
@@ -680,6 +683,9 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
         if self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
             await self.set_schedule_time_xiaohongshu(page, self.publish_date)
 
+        if self.prepare_only:
+            return
+
         while True:
             try:
                 if self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED:
@@ -713,6 +719,10 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
             page = await context.new_page()
             await self.upload_video_content(page)
             await context.storage_state(path=self.account_file)
+            if self.prepare_only:
+                print("SAU_PREPARED_FOR_REVIEW", flush=True)
+                await wait_for_manual_review(page, browser)
+                return
             xiaohongshu_logger.success(_msg("🥳", "cookie 更新完毕"))
         finally:
             await context.close()

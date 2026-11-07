@@ -13,6 +13,7 @@ from patchright.async_api import async_playwright
 
 from conf import BASE_DIR, DEBUG_MODE, LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
 from uploader.base_video import BaseVideoUploader
+from uploader.manual_review import wait_for_manual_review
 from utils.base_social_media import set_init_script
 from utils.login_qrcode import build_login_qrcode_path
 from utils.login_qrcode import decode_qrcode_from_path
@@ -638,11 +639,13 @@ class DouYinVideo(DouYinBaseUploader):
         productTitle="",
         thumbnail_portrait_path=None,
         desc: str | None = None,
-        collection_name: str | None = None,
         publish_strategy: str = DOUYIN_PUBLISH_STRATEGY_IMMEDIATE,
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
         declaration: str | None = None,
+        *,
+        collection_name: str | None = None,
+        prepare_only: bool = False,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -661,6 +664,7 @@ class DouYinVideo(DouYinBaseUploader):
         self.desc = desc or ""
         self.collection_name = collection_name
         self.declaration = declaration.strip() if declaration and declaration.strip() else None
+        self.prepare_only = prepare_only
 
     async def apply_self_declaration(self, page: Page) -> None:
         if not self.declaration:
@@ -1046,11 +1050,15 @@ class DouYinVideo(DouYinBaseUploader):
             await self.set_product_link(page, self.productLink, self.productTitle)
             douyin_logger.info(_msg("🥳", "商品链接设置完成"))
 
-        # 自主声明：本项目成片含 AI 生成内容（TTS 配音 / AI 字幕 / AI 前贴片），
-        # 按平台合规如实选「内容由AI生成」（与转载等并列，单选，无二级选项、无需填来源）。
-        if not self.declaration:
-            self.declaration = "内容由AI生成"
-        await self.apply_self_declaration(page)
+        try:
+            await self.apply_self_declaration(page)
+        except Exception:
+            for resource in (context, browser):
+                try:
+                    await resource.close()
+                except Exception:
+                    pass
+            raise
 
         # 先归集：此时尚未打开封面弹窗，避免 dy-creator-content-portal 封面浮层拦截合集下拉
         # （实测：封面弹窗在 headless 下常滞留"检测中"未关闭，会盖住"添加合集"下拉）
@@ -1066,6 +1074,15 @@ class DouYinVideo(DouYinBaseUploader):
 
         if self.publish_strategy == DOUYIN_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
             await self.set_schedule_time_douyin(page, self.publish_date)
+
+        if self.prepare_only:
+            await context.storage_state(path=self.account_file)
+            print("SAU_PREPARED_FOR_REVIEW", flush=True)
+            douyin_logger.info("发布页已填好，请在浏览器中检查并自行决定是否发布；关闭浏览器后任务结束")
+            await wait_for_manual_review(page, browser)
+            if browser.is_connected():
+                await browser.close()
+            return
 
         sms_prompt_logged = False
         while True:

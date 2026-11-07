@@ -1,6 +1,7 @@
 """CLI 共用的路径、标签和时间参数规则。"""
 from __future__ import annotations
 import argparse
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -24,7 +25,7 @@ def parse_tags(raw_tags: str | None) -> list[str]:
         return []
 
     tags: list[str] = []
-    for item in raw_tags.split(","):
+    for item in re.split(r"[,，]", raw_tags):
         cleaned = item.strip().lstrip("#")
         if cleaned:
             tags.append(cleaned)

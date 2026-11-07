@@ -14,6 +14,7 @@ from uuid import uuid4
 from patchright.async_api import Page, Playwright, async_playwright, expect, TimeoutError as BrowserTimeoutError
 
 from uploader.base_video import BaseVideoUploader
+from uploader.manual_review import wait_for_manual_review
 
 
 META_BUSINESS_URL = "https://business.facebook.com/latest/composer/"
@@ -156,6 +157,7 @@ class MetaBusinessUploader(BaseVideoUploader):
         proxy: str | None = None,
         headless: bool = False,
         result_file: str | Path | None = None,
+        prepare_only: bool = False,
     ):
         if platform not in META_PLATFORMS:
             raise ValueError(f"不支持的 Meta Business 平台: {platform}")
@@ -174,6 +176,7 @@ class MetaBusinessUploader(BaseVideoUploader):
         self.page_name = page_name.strip() if page_name else None
         self.proxy = proxy
         self.headless = headless
+        self.prepare_only = prepare_only
         self.result_file = Path(result_file) if result_file else Path('.local/meta-results') / f'{uuid4().hex}.json'
         self.result = {"platform": platform, "title": self.title, "status": "not_submitted"}
 
@@ -435,6 +438,12 @@ class MetaBusinessUploader(BaseVideoUploader):
                 await self._fill_caption(page)
                 await self._advance_reels(page)
                 await self._fill_schedule(page)
+                if self.prepare_only:
+                    await context.storage_state(path=str(self.account_file))
+                    self.result['status'] = 'prepared'
+                    print("SAU_PREPARED_FOR_REVIEW", flush=True)
+                    await wait_for_manual_review(page, browser)
+                    return self.result
                 await self._publish(page)
                 await context.storage_state(path=str(self.account_file))
                 return self.result

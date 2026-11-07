@@ -57,6 +57,7 @@ def register(platform_parsers):
         upload_video_parser.add_argument("--title", required=True)
         upload_video_parser.add_argument("--desc", default="")
         upload_video_parser.add_argument("--tags", default="")
+        upload_video_parser.add_argument("--prepare-only", action="store_true", help="Fill the upload page and wait for manual review without publishing")
         upload_video_parser.add_argument("--page", default=None, help="Business Suite 发布主体名称；不传使用当前主体")
         upload_video_parser.add_argument("--schedule", type=schedule_value, help=f"定时发布时间，格式 {schedule_help}")
         upload_video_parser.add_argument("--proxy", default=FACEBOOK_PAGE_PROXY, help="代理地址；不传时直连")
@@ -93,6 +94,7 @@ class MetaUploadRequest:
     debug: bool = True
     headless: bool = False
     result_file: Path | None = None
+    prepare_only: bool = False
 
 
 async def login_meta_account(platform: str, account_name: str, *, headless: bool = False, proxy: str | None = FACEBOOK_PAGE_PROXY) -> dict:
@@ -131,6 +133,7 @@ async def upload_meta_content(request: MetaUploadRequest) -> dict:
         proxy=request.proxy,
         headless=request.headless,
         result_file=request.result_file,
+        prepare_only=request.prepare_only,
     )
     return await app.upload()
 
@@ -175,7 +178,8 @@ async def run(args):
             result_file=args.result,
             proxy=args.proxy,
             debug=args.debug,
-            headless=args.headless,
+            headless=False if getattr(args, "prepare_only", False) else args.headless,
+            prepare_only=getattr(args, "prepare_only", False),
         )
         result = await upload_meta_content(request)
         print(json.dumps(result, ensure_ascii=False, indent=2))

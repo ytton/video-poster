@@ -13,6 +13,7 @@ from patchright.async_api import async_playwright
 
 from conf import DEBUG_MODE, LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
 from uploader.base_video import BaseVideoUploader
+from uploader.manual_review import wait_for_manual_review
 from utils.base_social_media import set_init_script
 from utils.files_times import get_absolute_path
 from utils.login_qrcode import build_login_qrcode_path
@@ -520,6 +521,7 @@ class KSVideo(KSBaseUploader):
         thumbnail_path=None,
         desc: str | None = None,
         collection_name: str | None = None,
+        prepare_only: bool = False,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -534,6 +536,7 @@ class KSVideo(KSBaseUploader):
         self.thumbnail_path = thumbnail_path
         self.desc = desc or ""
         self.collection_name = collection_name
+        self.prepare_only = prepare_only
 
     async def apply_collection(self, page: Page) -> None:
         """在发布表单页选择"加入合集"下拉框（Ant Design Select，label 属性=合集名）。
@@ -667,7 +670,8 @@ class KSVideo(KSBaseUploader):
             await page.keyboard.press("Backspace")
             await page.keyboard.press("Control+KeyA")
             await page.keyboard.press("Delete")
-            await page.keyboard.type(self.desc or self.title)
+            caption = self.title if not self.desc.strip() or self.desc.strip() == self.title.strip() else f"{self.title}\n{self.desc}"
+            await page.keyboard.type(caption)
             await page.keyboard.press("Enter")
 
             for index, tag in enumerate(self.tags[:3], start=1):
@@ -708,6 +712,13 @@ class KSVideo(KSBaseUploader):
             if self.publish_strategy == KUAISHOU_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
                 await self.set_schedule_time(page, self.publish_date)
 
+            if self.prepare_only:
+                await context.storage_state(path=self.account_file)
+                print("SAU_PREPARED_FOR_REVIEW", flush=True)
+                kuaishou_logger.info("发布页已填好，请在浏览器中检查并自行决定是否发布；关闭浏览器后任务结束")
+                await wait_for_manual_review(page, browser)
+                return
+
             last_publish_error = None
             for attempt in range(1, KUAISHOU_PUBLISH_ATTEMPTS + 1):
                 try:
@@ -743,8 +754,9 @@ class KSVideo(KSBaseUploader):
                 await context.storage_state(path=self.account_file)
                 kuaishou_logger.success(_msg("🥳", "cookie 更新完毕"))
                 await asyncio.sleep(2)
-            await context.close()
-            await browser.close()
+            if browser.is_connected():
+                await context.close()
+                await browser.close()
 
     async def main(self):
         async with async_playwright() as playwright:

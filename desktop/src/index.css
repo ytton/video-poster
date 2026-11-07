@@ -60,3 +60,5 @@ button:disabled { cursor: not-allowed; }
 .tool-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
 .tool-scroll::-webkit-scrollbar-thumb { background: transparent; border-radius: 8px; }
 .tool-scroll:hover::-webkit-scrollbar-thumb, .tool-scroll:focus-within::-webkit-scrollbar-thumb, .tool-scroll.is-scrolling::-webkit-scrollbar-thumb { background: #a4b4bc; }
+.frame-strip-scroll { overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+.frame-strip-scroll::-webkit-scrollbar { display: none; }

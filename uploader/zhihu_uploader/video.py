@@ -14,6 +14,7 @@ import cv2
 from patchright.async_api import Page, async_playwright, expect
 
 from conf import LOCAL_CHROME_PATH
+from uploader.manual_review import wait_for_manual_review
 from uploader.zhihu_uploader.constants import (
     ZHIHU_ORIGINALITY, ZHIHU_TIMEZONE, ZHIHU_VIDEO_DESCRIPTION_MAX, ZHIHU_VIDEO_EXTENSIONS,
     ZHIHU_VIDEO_MAX_BYTES, ZHIHU_VIDEO_MIN_BYTES, ZHIHU_VIDEO_MAX_SECONDS, ZHIHU_VIDEO_TITLE_MAX,
@@ -235,6 +236,9 @@ class ZhihuVideo:
                 result["status"] = "prepared"
                 result_file.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
                 if self.prepare_only:
+                    await context.storage_state(path=str(self.account_file))
+                    print("SAU_PREPARED_FOR_REVIEW", flush=True)
+                    await wait_for_manual_review(page, browser)
                     return result
 
                 # 当前视频入口在原页显示成功弹层，“查看详情”另开 /pin/<id>。

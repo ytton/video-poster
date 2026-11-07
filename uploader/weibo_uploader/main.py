@@ -24,6 +24,7 @@ from patchright.async_api import Page, Playwright, TimeoutError as PWTimeoutErro
 
 from conf import BASE_DIR, LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
 from uploader.base_video import BaseVideoUploader
+from uploader.manual_review import wait_for_manual_review
 from utils.log import weibo_logger
 from utils.login_qrcode import build_login_qrcode_path, remove_qrcode_file
 
@@ -285,6 +286,7 @@ class WeiBoVideo(BaseVideoUploader):
         collection_name: str | None = None,
         debug: bool = True,
         headless: bool = LOCAL_CHROME_HEADLESS,
+        prepare_only: bool = False,
     ):
         self.title = title
         self.file_path = file_path
@@ -296,6 +298,7 @@ class WeiBoVideo(BaseVideoUploader):
         self.collection_name = collection_name
         self.debug = debug
         self.headless = headless
+        self.prepare_only = prepare_only
         self.local_executable_path = LOCAL_CHROME_PATH
         self.max_title_length = 30
 
@@ -359,6 +362,12 @@ class WeiBoVideo(BaseVideoUploader):
 
             # 9) 填写描述（包含标签）
             await self._fill_description(publish_page)
+
+            if self.prepare_only:
+                await context.storage_state(path=self.account_file)
+                print("SAU_PREPARED_FOR_REVIEW", flush=True)
+                await wait_for_manual_review(publish_page, browser)
+                return
 
             # 10) 点击发布并校验真成功
             await self._submit_publish(publish_page)

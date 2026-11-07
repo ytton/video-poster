@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 
 from patchright.async_api import Page, Playwright, async_playwright, expect
+from uploader.manual_review import wait_for_manual_review
 
 from utils.log import facebook_logger
 
@@ -162,6 +163,7 @@ class FacebookPost:
         account_file: str | Path,
         proxy: str | None = None,
         headless: bool = True,
+        prepare_only: bool = False,
     ):
         self.title = title.strip()
         self.files = [Path(item) for item in file_path] if isinstance(file_path, list) else [Path(file_path)]
@@ -171,6 +173,7 @@ class FacebookPost:
         self.account_file = Path(account_file)
         self.proxy = proxy
         self.headless = headless
+        self.prepare_only = prepare_only
 
     def _caption(self) -> str:
         """Facebook 首页没有独立视频标题字段，按项目统一约定合并为正文。"""
@@ -266,6 +269,11 @@ class FacebookPost:
                 raise RuntimeError("Facebook 正文输入框未读回预期内容")
 
             await self._wait_until_publishable(page)
+            if self.prepare_only:
+                await context.storage_state(path=str(self.account_file))
+                print("SAU_PREPARED_FOR_REVIEW", flush=True)
+                await wait_for_manual_review(page, browser)
+                return
             await self._publish_and_verify(page)
             await context.storage_state(path=str(self.account_file))
         finally:

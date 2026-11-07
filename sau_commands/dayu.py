@@ -98,7 +98,7 @@ async def run(args):
         app = DayuVideo(
             title=args.title, file_path=args.file, tags=parse_tags(args.tags),
             account_file=account_file, thumbnail_path=args.thumbnail, category=args.category,
-            source=args.source, desc=args.desc, headless=args.headless, debug=args.debug,
+            source=args.source, desc=args.desc, headless=False if args.prepare_only else args.headless, debug=args.debug,
             prepare_only=args.prepare_only, upload_timeout=args.upload_timeout,
             source_url=args.source_url, schedule=args.schedule,
         )

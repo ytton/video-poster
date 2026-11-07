@@ -18,6 +18,7 @@ from patchright.async_api import Page, Playwright, async_playwright
 
 from conf import DEBUG_MODE
 from uploader.base_video import BaseVideoUploader
+from uploader.manual_review import wait_for_manual_review
 from utils.base_social_media import set_init_script
 from utils.log import youtube_logger
 
@@ -185,7 +186,7 @@ async def _wait_upload_complete(page: Page, max_polls: int = 360) -> bool:
 class YouTubeVideo(BaseVideoUploader):
     def __init__(self, title, file_path, tags, account_file, *,
                  description="", thumbnail_path=None, playlist=None,
-                 visibility="public", debug=DEBUG_MODE, headless=False):
+                 visibility="public", debug=DEBUG_MODE, headless=False, prepare_only=False):
         self.title = title
         self.file_path = str(file_path)
         self.tags = tags or []
@@ -196,6 +197,7 @@ class YouTubeVideo(BaseVideoUploader):
         self.visibility = visibility if visibility in VISIBILITY else "public"
         self.debug = debug
         self.headless = headless
+        self.prepare_only = prepare_only
 
     async def upload(self, playwright: Playwright) -> None:
         browser = await playwright.chromium.launch(
@@ -304,10 +306,17 @@ class YouTubeVideo(BaseVideoUploader):
         youtube_logger.info(_msg("📤", "等待上传完成（传完才发布）…"))
         await _wait_upload_complete(page)
 
+        if self.prepare_only:
+            await context.storage_state(path=self.account_file)
+            print("SAU_PREPARED_FOR_REVIEW", flush=True)
+            await wait_for_manual_review(page, browser)
+            await browser.close()
+            return
+
         # 11) 发布
         await page.wait_for_timeout(1200)
         if not await _click_if_present(page, "#done-button", 15000):
-            youtube_logger.warning(_msg("🤔", "未找到发布按钮，可能上传未到可发布进度；请在窗口里手动发布"))
+            raise RuntimeError("YouTube 未找到发布按钮，无法确认本次视频已提交，请到平台后台核对")
         else:
             await page.wait_for_timeout(4000)
             video_url = ""

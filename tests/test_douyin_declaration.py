@@ -5,9 +5,27 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from uploader.douyin_uploader import main as douyin_main
 from uploader.douyin_uploader.main import DouYinVideo
+from uploader.manual_review import wait_for_manual_review
 
 
 class DouyinDeclarationTests(unittest.TestCase):
+    def test_review_window_stays_open_until_user_closes_it(self):
+        async def scenario():
+            callbacks = {}
+            page = MagicMock()
+            page.is_closed.return_value = False
+            page.on.side_effect = lambda event, callback: callbacks.setdefault("page", callback)
+            browser = MagicMock()
+            browser.is_connected.return_value = True
+            browser.on.side_effect = lambda event, callback: callbacks.setdefault("browser", callback)
+            pending = asyncio.create_task(wait_for_manual_review(page, browser))
+            await asyncio.sleep(0)
+            self.assertFalse(pending.done())
+            callbacks["page"](page)
+            await pending
+
+        asyncio.run(scenario())
+
     def test_upload_only_sets_explicit_declaration(self):
         video = DouYinVideo(
             "标题", "/tmp/demo.mp4", [], 0, "/tmp/cookie.json",
@@ -68,9 +86,12 @@ class DouyinDeclarationTests(unittest.TestCase):
         locator = MagicMock()
         locator.set_input_files = AsyncMock()
         locator.count = AsyncMock(return_value=1)
+        locator.wait_for = AsyncMock()
+        locator.first = locator
         page = MagicMock()
         page.goto = AsyncMock()
         page.wait_for_url = AsyncMock()
+        page.wait_for_timeout = AsyncMock()
         page.wait_for_selector = AsyncMock()
         page.locator.return_value = locator
 
@@ -92,6 +113,43 @@ class DouyinDeclarationTests(unittest.TestCase):
 
         context.close.assert_awaited_once()
         browser.close.assert_awaited_once()
+
+    def test_prepare_only_hands_off_before_clicking_publish(self):
+        video = DouYinVideo("标题", "/tmp/demo.mp4", [], 0, "/tmp/cookie.json", prepare_only=True)
+        for method in ("validate_upload_args", "fill_title_and_description", "apply_self_declaration", "apply_collection", "set_thumbnail"):
+            setattr(video, method, AsyncMock())
+
+        locator = MagicMock()
+        locator.count = AsyncMock(return_value=1)
+        locator.wait_for = AsyncMock()
+        locator.set_input_files = AsyncMock()
+        locator.first = locator
+        page = MagicMock()
+        page.goto = AsyncMock()
+        page.wait_for_url = AsyncMock()
+        page.wait_for_timeout = AsyncMock()
+        page.locator.return_value = locator
+        page.eval_on_selector = AsyncMock(return_value="semi-switch-checked")
+        context = MagicMock()
+        context.new_page = AsyncMock(return_value=page)
+        context.storage_state = AsyncMock()
+        browser = MagicMock()
+        browser.new_context = AsyncMock(return_value=context)
+        browser.is_connected.return_value = True
+        browser.close = AsyncMock()
+        playwright = MagicMock()
+        playwright.chromium.launch = AsyncMock(return_value=browser)
+
+        with (
+            patch.object(douyin_main, "set_init_script", AsyncMock(return_value=context)),
+            patch.object(douyin_main, "wait_for_manual_review", AsyncMock()) as handoff,
+            patch.object(douyin_main.asyncio, "sleep", AsyncMock()),
+        ):
+            asyncio.run(video.upload(playwright))
+
+        handoff.assert_awaited_once_with(page, browser)
+        page.get_by_role.assert_not_called()
+        context.storage_state.assert_awaited_once()
 
 
 if __name__ == "__main__":

@@ -102,7 +102,7 @@ class InstagramBrowserRegressionTests(unittest.TestCase):
                       function create(){document.body.insertAdjacentHTML('beforeend',
                         `<div role="dialog"><input type="file" accept="image/jpeg,video/mp4" onchange="upload()"></div>`);}
                       function upload(){setTimeout(()=>{
-                        document.querySelector('[role=dialog]').insertAdjacentHTML('beforeend',
+                        document.querySelector('input[type=file]').closest('[role=dialog]').insertAdjacentHTML('beforeend',
                           '<div class="_ac76"><div role="button">Next</div></div>');
                         if(document.body.dataset.prompts==='true') document.body.insertAdjacentHTML('beforeend',
                           `<div role="dialog"><img src="/images/instagram/clips/reels_nux_icon.png?test">

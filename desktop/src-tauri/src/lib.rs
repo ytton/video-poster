@@ -1,8 +1,9 @@
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex},
@@ -30,6 +31,14 @@ struct RuntimeInfo {
 struct DetectedAccount {
     platform: String,
     name: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileDigest {
+    sha256: String,
+    bytes: u64,
+    file_path: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -106,6 +115,63 @@ fn prepare_video_preview(app: AppHandle, path: String) -> Result<String, String>
     }
     app.asset_protocol_scope().allow_file(&file).map_err(|error| format!("无法预览视频：{error}"))?;
     Ok(requested.display().to_string())
+}
+
+#[tauri::command]
+async fn hash_video_file(path: String) -> Result<FileDigest, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let file_path = PathBuf::from(path).canonicalize().map_err(|error| format!("找不到视频文件：{error}"))?;
+        let file = fs::File::open(&file_path).map_err(|error| format!("无法读取视频：{error}"))?;
+        let before = file.metadata().map_err(|error| error.to_string())?;
+        if !before.is_file() { return Err("请选择视频文件".into()); }
+        let mut reader = std::io::BufReader::new(file);
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 1024 * 1024];
+        let mut bytes = 0u64;
+        loop {
+            let count = reader.read(&mut buffer).map_err(|error| format!("读取视频失败：{error}"))?;
+            if count == 0 { break; }
+            hasher.update(&buffer[..count]);
+            bytes += count as u64;
+        }
+        let after = fs::metadata(&file_path).map_err(|error| error.to_string())?;
+        if bytes != before.len() || before.len() != after.len() || before.modified().ok() != after.modified().ok() {
+            return Err("视频文件在计算哈希时发生变化，请重试".into());
+        }
+        Ok(FileDigest { sha256: format!("{:x}", hasher.finalize()), bytes, file_path: file_path.display().to_string() })
+    }).await.map_err(|error| format!("计算视频哈希失败：{error}"))?
+}
+
+#[tauri::command]
+fn prepare_cover_preview(app: AppHandle, path: String) -> Result<String, String> {
+    let file = PathBuf::from(&path).canonicalize().map_err(|error| format!("找不到封面图片：{error}"))?;
+    if !file.is_file() {
+        return Err("请选择封面图片".into());
+    }
+    let extension = file.extension().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase();
+    if !["jpg", "jpeg", "png"].contains(&extension.as_str()) {
+        return Err("请选择 JPG 或 PNG 封面图片".into());
+    }
+    app.asset_protocol_scope().allow_file(&file).map_err(|error| format!("无法预览封面：{error}"))?;
+    Ok(file.display().to_string())
+}
+
+#[tauri::command]
+fn save_cover_frame(app: AppHandle, orientation: String, bytes: Vec<u8>) -> Result<String, String> {
+    if !["landscape", "portrait"].contains(&orientation.as_str()) {
+        return Err("封面方向无效".into());
+    }
+    if bytes.len() < 4 || bytes.len() > 4_500_000 || !bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        return Err("截帧图片无效或超过 4.5 MB".into());
+    }
+    let folder = app.path().app_data_dir().map_err(|error| error.to_string())?.join("covers");
+    fs::create_dir_all(&folder).map_err(|error| format!("无法建立封面目录：{error}"))?;
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?.as_nanos();
+    let file = folder.join(format!("frame-{orientation}-{stamp}.jpg"));
+    fs::write(&file, bytes).map_err(|error| format!("无法保存封面：{error}"))?;
+    app.asset_protocol_scope().allow_file(&file).map_err(|error| format!("无法预览封面：{error}"))?;
+    Ok(file.display().to_string())
 }
 
 #[tauri::command]
@@ -263,9 +329,23 @@ fn open_bilibili_login(app: AppHandle, state: State<'_, TaskRegistry>, repo_dir:
         return Err("请填写账号别名".into());
     }
     let root = installed_root(repo_dir)?;
-    let mut command = std::process::Command::new(cli_path(&root));
-    command.args(["bilibili", "login", "--account", &account])
-        .current_dir(&root).env("PYTHONIOENCODING", "utf-8");
+    #[cfg(windows)]
+    let mut command = {
+        let mut command = std::process::Command::new("powershell.exe");
+        command.args([
+            "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+            "$ErrorActionPreference = 'Stop'; try { & $env:SAU_BILI_CLI 'bilibili' 'login' '--account' $env:SAU_BILI_ACCOUNT; $code = $LASTEXITCODE } catch { Write-Host $_; $code = 1 }; if ($code -ne 0) { Write-Host 'B站登录失败，请查看上方错误'; Read-Host '按回车关闭窗口' | Out-Null }; exit $code",
+        ]);
+        command.env("SAU_BILI_CLI", cli_path(&root)).env("SAU_BILI_ACCOUNT", &account);
+        command
+    };
+    #[cfg(not(windows))]
+    let mut command = {
+        let mut command = std::process::Command::new(cli_path(&root));
+        command.args(["bilibili", "login", "--account", &account]);
+        command
+    };
+    command.current_dir(&root).env("PYTHONIOENCODING", "utf-8");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -307,7 +387,7 @@ pub fn run() {
             }));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![runtime_info, list_accounts, remove_session, cli_schema, start_cli, cancel_cli, open_bilibili_login, prepare_video_preview])
+        .invoke_handler(tauri::generate_handler![runtime_info, list_accounts, remove_session, cli_schema, start_cli, cancel_cli, open_bilibili_login, prepare_video_preview, hash_video_file, prepare_cover_preview, save_cover_frame])
         .build(tauri::generate_context!())
         .expect("failed to start desktop app");
     app.run(|handle, event| {

@@ -13,6 +13,7 @@ import requests
 
 
 GITHUB_RELEASE_API = "https://api.github.com/repos/biliup/biliup/releases/latest"
+FALLBACK_CLI_RELEASE_TAG = "v1.3.4"
 
 
 def get_biliup_runtime_root() -> Path:
@@ -93,6 +94,27 @@ def fetch_latest_release() -> dict:
     }
 
 
+def fallback_cli_release() -> dict:
+    platform_key = _build_platform_key()
+    supported = {
+        "windows-x86_64": "x86_64-windows.zip",
+        "linux-x86_64": "x86_64-linux.tar.xz",
+        "linux-aarch64": "aarch64-linux.tar.xz",
+        "linux-arm": "arm-linux.tar.xz",
+        "macos-x86_64": "x86_64-macos.tar.xz",
+        "macos-aarch64": "aarch64-macos.tar.xz",
+    }
+    suffix = supported.get(platform_key)
+    if not suffix:
+        raise RuntimeError(f"Unsupported biliup platform: {platform_key}")
+    asset_name = f"biliupR-{FALLBACK_CLI_RELEASE_TAG}-{suffix}"
+    return {
+        "tag_name": FALLBACK_CLI_RELEASE_TAG,
+        "asset_name": asset_name,
+        "asset_url": f"https://github.com/biliup/biliup/releases/download/{FALLBACK_CLI_RELEASE_TAG}/{asset_name}",
+    }
+
+
 def read_local_biliup_version() -> str | None:
     version_path = _build_biliup_version_path()
     if not version_path.exists():
@@ -161,10 +183,10 @@ def ensure_biliup_binary(force_check: bool = True) -> Path:
     try:
         release = fetch_latest_release()
     except Exception:
-        # 如果本地已经有可执行的 biliup，就在 GitHub 限流/网络失败时直接复用本地版本。
+        # Latest may be rate-limited or contain only desktop installers, without the CLI archive.
         if binary_path.exists():
             return binary_path
-        raise
+        release = fallback_cli_release()
 
     latest_version = release["tag_name"]
     if binary_path.exists() and local_version == latest_version:

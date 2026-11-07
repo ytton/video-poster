@@ -64,6 +64,7 @@ def register(platform_parsers):
     facebook_upload_video_parser.add_argument("--title", required=True, help="Post title, merged into Facebook caption")
     facebook_upload_video_parser.add_argument("--desc", default="", help="Optional post description")
     facebook_upload_video_parser.add_argument("--tags", default="", help="Comma-separated tags, such as tag1,tag2")
+    facebook_upload_video_parser.add_argument("--prepare-only", action="store_true", help="Fill the upload page and wait for manual review without publishing")
     facebook_upload_video_parser.add_argument(
         "--proxy",
         default=FACEBOOK_PROXY,
@@ -92,6 +93,7 @@ class FacebookVideoUploadRequest:
     proxy: str | None = FACEBOOK_PROXY
     debug: bool = True
     headless: bool = True
+    prepare_only: bool = False
 
 
 async def login_facebook_account(
@@ -137,6 +139,7 @@ async def upload_facebook_video(request: FacebookVideoUploadRequest) -> Path:
         account_file=account_file,
         proxy=request.proxy,
         headless=request.headless,
+        prepare_only=request.prepare_only,
     )
     await app.main()
     return account_file
@@ -189,10 +192,11 @@ async def run(args):
             tags=parse_tags(args.tags),
             proxy=args.proxy,
             debug=args.debug,
-            headless=args.headless,
+            headless=False if getattr(args, "prepare_only", False) else args.headless,
+            prepare_only=getattr(args, "prepare_only", False),
         )
         await upload_facebook_video(request)
-        print(f"Facebook video upload submitted: {request.video_file}")
+        print(f"Facebook review window closed: {request.video_file}" if request.prepare_only else f"Facebook video upload submitted: {request.video_file}")
         return 0
 
     raise RuntimeError(f"Unsupported Facebook action: {args.action}")

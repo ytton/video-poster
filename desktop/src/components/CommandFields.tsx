@@ -68,10 +68,6 @@ export function CommandFields({ options, values, onChange, omit = [], accountNam
           : <Input type={option.kind === "number" ? "number" : "text"} value={typeof value === "string" ? value : ""} onChange={event => onChange(option.name, event.target.value)} placeholder={option.help} className="bg-white" />}
       </label>
     })}
-    {options.some(option => option.name === "headless") && !omit.includes("headless") && <label className="flex min-h-9 items-center gap-2 text-sm">
-      <Checkbox checked={values.headed === true} onCheckedChange={checked => onChange("headed", checked === true)} />
-      <span>显示浏览器窗口</span>
-    </label>}
   </div>
 }
 

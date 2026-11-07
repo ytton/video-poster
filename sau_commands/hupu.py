@@ -31,6 +31,7 @@ def register(platform_parsers):
     hupu_upload_video_parser.add_argument("--desc", default="", help="Optional video description")
     hupu_upload_video_parser.add_argument("--tags", default="", help="Comma-separated tags, such as tag1,tag2")
     hupu_upload_video_parser.add_argument("--thumbnail", type=existing_file_path, help="Optional cover image path")
+    hupu_upload_video_parser.add_argument("--prepare-only", action="store_true", help="Fill the upload page and wait for manual review without publishing")
     add_runtime_flags(hupu_upload_video_parser)
 
 
@@ -44,6 +45,7 @@ class HupuVideoUploadRequest:
     thumbnail_file: Path | None = None
     debug: bool = True
     headless: bool = True
+    prepare_only: bool = False
 
 
 async def login_hupu_account(account_name: str, headless: bool = False, qrcode_callback=None) -> dict:
@@ -75,6 +77,7 @@ async def upload_hupu_video(request: HupuVideoUploadRequest) -> Path:
         thumbnail_path=str(request.thumbnail_file) if request.thumbnail_file else None,
         debug=request.debug,
         headless=request.headless,
+        prepare_only=request.prepare_only,
     )
     await app.main()
     return account_file
@@ -103,10 +106,11 @@ async def run(args):
             tags=parse_tags(args.tags),
             thumbnail_file=args.thumbnail,
             debug=args.debug,
-            headless=args.headless,
+            headless=False if getattr(args, "prepare_only", False) else args.headless,
+            prepare_only=getattr(args, "prepare_only", False),
         )
         await upload_hupu_video(request)
-        print(f"Hupu video upload submitted: {request.video_file}")
+        print(f"Hupu review window closed: {request.video_file}" if request.prepare_only else f"Hupu video upload submitted: {request.video_file}")
         return 0
 
     raise RuntimeError(f"Unsupported Hupu action: {args.action}")

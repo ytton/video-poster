@@ -1,10 +1,11 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react"
 import { accountId } from "./platforms"
 import { buildArgs, findAction } from "./args"
-import { cancelCli, cliSchema, detectedAccounts, inDesktop, onCliFinished, onCliLine, onNativeFault, openBilibiliLogin, removeSession, runtimeInfo, startCli } from "./cli"
-import { deleteAccount, loadAccounts, loadTasks, saveAccount, saveTask } from "./db"
+import { cancelCli, cliSchema, detectedAccounts, hashVideoFile, inDesktop, onCliFinished, onCliLine, onNativeFault, openBilibiliLogin, removeSession, runtimeInfo, startCli } from "./cli"
+import { addWorkPublication, deleteAccount, getOrCreateWork, loadAccounts, loadTasks, loadWorks, saveAccount, saveAccountOrder, saveTask } from "./db"
 import { redact, reportFault } from "./faults"
-import type { AccountRecord, AccountStatus, CliNode, FormValues, RuntimeInfo, TaskRecord } from "./types"
+import { isConfirmedPublication } from "./works"
+import type { AccountRecord, AccountStatus, CliNode, FormValues, RuntimeInfo, TaskRecord, WorkContent, WorkRecord } from "./types"
 
 interface AppModel {
   runtime: RuntimeInfo | null
@@ -13,6 +14,7 @@ interface AppModel {
   accounts: AccountRecord[]
   statuses: Record<string, AccountStatus>
   tasks: TaskRecord[]
+  works: WorkRecord[]
   loading: boolean
   storageError: string
   operationError: string
@@ -22,11 +24,13 @@ interface AppModel {
   reload: () => Promise<void>
   addAccount: (platform: string, name: string) => Promise<AccountRecord>
   unbindAccount: (account: AccountRecord) => Promise<void>
+  reorderAccounts: (sourceId: string, targetId: string) => Promise<void>
   loginAccount: (account: AccountRecord) => Promise<void>
   checkAccount: (account: AccountRecord) => void
   checkAll: () => void
-  enqueue: (platform: string, action: string, args: string[], accountName?: string) => string
-  runAction: (platform: string, action: string, values: FormValues) => string
+  prepareWork: (filePath: string, content: WorkContent, expectedHash?: string) => Promise<WorkRecord>
+  enqueue: (platform: string, action: string, args: string[], accountName?: string, work?: { id: string; values: FormValues }) => string
+  runAction: (platform: string, action: string, values: FormValues) => Promise<string>
   cancelTask: (id: string) => Promise<void>
 }
 
@@ -40,6 +44,10 @@ export function useApp(): AppModel {
 
 interface QueuedCommand { taskId: string; repoDir: string; args: string[] }
 
+const sortAccounts = (items: AccountRecord[]) => items.sort((a, b) =>
+  (a.order ?? Number.MAX_SAFE_INTEGER) - (b.order ?? Number.MAX_SAFE_INTEGER)
+  || a.platform.localeCompare(b.platform) || a.name.localeCompare(b.name))
+
 export function AppProvider({ children }: { children: ReactNode }) {
   const [repoDir, setRepoDir] = useState(() => localStorage.getItem("sau-repo-dir") || "")
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null)
@@ -47,6 +55,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [accounts, setAccounts] = useState<AccountRecord[]>([])
   const [statuses, setStatuses] = useState<Record<string, AccountStatus>>({})
   const [tasks, setTasks] = useState<TaskRecord[]>([])
+  const [works, setWorks] = useState<WorkRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [storageError, setStorageError] = useState("")
   const [operationError, setOperationError] = useState("")
@@ -80,7 +89,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         await saveAccount(account)
       }
     }
-    setAccounts([...merged.values()].sort((a, b) => a.platform.localeCompare(b.platform) || a.name.localeCompare(b.name)))
+    setAccounts(sortAccounts([...merged.values()]))
   }, [runtime])
   refreshAccountsRef.current = refreshAccounts
 
@@ -97,11 +106,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
           setSchema([])
           setAccounts([])
           setTasks([])
+          setWorks([])
           taskRef.current = []
           return
         }
-        const [nextSchema, saved, detected, storedTasks] = await Promise.all([
-          cliSchema(info.root), loadAccounts(info.root), detectedAccounts(info.root), loadTasks(info.root),
+        const [nextSchema, saved, detected, storedTasks, storedWorks] = await Promise.all([
+          cliSchema(info.root), loadAccounts(info.root), detectedAccounts(info.root), loadTasks(info.root), loadWorks(info.root),
         ])
         if (!active) return
         setSchema(nextSchema)
@@ -114,12 +124,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
             await saveAccount(account)
           }
         }
-        setAccounts([...merged.values()].sort((a, b) => a.platform.localeCompare(b.platform) || a.name.localeCompare(b.name)))
+        setAccounts(sortAccounts([...merged.values()]))
         const restored = storedTasks.map(task => task.status === "running" || task.status === "queued"
           ? { ...task, status: "interrupted" as const, finishedAt: new Date().toISOString(), message: "程序已重新启动，发布结果请到平台核对" }
           : task)
         taskRef.current = restored
         setTasks(restored)
+        setWorks(storedWorks)
         await Promise.all(restored.filter(task => task.status === "interrupted").map(saveTask))
       } catch (error) {
         if (active) setOperationError(`读取项目失败：${String(error)}`)
@@ -142,11 +153,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
     })
   }
 
-  const enqueue = (platform: string, action: string, args: string[], accountName?: string): string => {
+  const prepareWork = async (filePath: string, content: WorkContent, expectedHash?: string): Promise<WorkRecord> => {
+    if (!runtime?.ready) throw new Error("CLI 未就绪")
+    const digest = await hashVideoFile(filePath)
+    if (expectedHash && expectedHash !== digest.sha256) throw new Error("视频文件内容已改变，请选择原作品文件后再补发")
+    const work = await getOrCreateWork(runtime.root, digest.sha256, digest.bytes, digest.filePath, content)
+    setWorks(previous => [work, ...previous.filter(item => item.id !== work.id)])
+    return work
+  }
+
+  const enqueue = (platform: string, action: string, args: string[], accountName?: string, work?: { id: string; values: FormValues }): string => {
     if (!runtime?.ready) throw new Error("请先连接可用的 CLI 项目")
     const id = crypto.randomUUID()
+    const titleIndex = args.indexOf("--title")
+    const workTitle = action.startsWith("upload-") && titleIndex >= 0 ? args[titleIndex + 1] : undefined
     const record: TaskRecord = {
-      id, repoRoot: runtime.root, platform, action, accountName,
+      id, repoRoot: runtime.root, platform, action, accountName, workTitle,
+      workId: work?.id, publishValues: work?.values,
+      prepareOnly: args.includes("--prepare-only") || args.includes("--draft"),
       status: "queued", startedAt: new Date().toISOString(), lines: [],
     }
     taskRef.current = [record, ...taskRef.current].slice(0, 200)
@@ -166,13 +190,29 @@ export function AppProvider({ children }: { children: ReactNode }) {
       onCliLine(payload => {
         const task = taskRef.current.find(item => item.id === payload.taskId)
         if (!task) return
+        if (payload.text.trim() === "SAU_PREPARED_FOR_REVIEW") {
+          updateTask(payload.taskId, { message: "发布页已填好，正在等待浏览器中的人工检查" })
+          if (activeTaskId.current === payload.taskId) {
+            activeTaskId.current = null
+            pumpRef.current()
+          }
+          return
+        }
         updateTask(payload.taskId, { lines: [...task.lines, redact(payload.text)].slice(-150) })
       }),
       onCliFinished(payload => {
         const task = taskRef.current.find(item => item.id === payload.taskId)
         if (!task) return
-        const status = payload.cancelled ? "cancelled" : payload.exitCode === 0 ? "success" : "failed"
-        updateTask(payload.taskId, { status, exitCode: payload.exitCode, message: payload.message, finishedAt: new Date().toISOString() })
+        const status = payload.cancelled ? "cancelled" : payload.exitCode === 0 ? task.prepareOnly ? "prepared" : "success" : "failed"
+        const message = status === "prepared" ? "内容已交给平台；是否发布请到平台后台核对" : payload.message
+        updateTask(payload.taskId, { status, exitCode: payload.exitCode, message, finishedAt: new Date().toISOString() })
+        if (isConfirmedPublication(task, status) && task.workId && task.publishValues) {
+          void addWorkPublication(task.workId, {
+            taskId: task.id, platform: task.platform, accountName: task.accountName || "",
+            publishedAt: new Date().toISOString(), values: task.publishValues,
+          }).then(work => setWorks(previous => [work, ...previous.filter(item => item.id !== work.id)]))
+            .catch(error => setStorageError(`作品发布记录未保存：${String(error)}`))
+        }
         if (task.action === "check" && task.accountName) {
           const id = accountId(task.repoRoot, task.platform, task.accountName)
           const answer = [...task.lines].reverse().find(line => line.trim() === "valid" || line.trim() === "invalid")?.trim()
@@ -215,10 +255,29 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const id = accountId(runtime.root, platform, trimmed)
     const existing = accounts.find(account => account.id === id)
     if (existing) return existing
-    const account = { id, repoRoot: runtime.root, platform, name: trimmed, createdAt: new Date().toISOString() }
+    const account = { id, repoRoot: runtime.root, platform, name: trimmed, createdAt: new Date().toISOString(),
+      order: Math.max(-1, ...accounts.map((item, index) => item.order ?? index)) + 1 }
     await saveAccount(account)
-    setAccounts(previous => [...previous, account].sort((a, b) => a.platform.localeCompare(b.platform) || a.name.localeCompare(b.name)))
+    setAccounts(previous => sortAccounts([...previous, account]))
     return account
+  }
+
+  const reorderAccounts = async (sourceId: string, targetId: string): Promise<void> => {
+    if (sourceId === targetId) return
+    const source = accounts.findIndex(account => account.id === sourceId)
+    const target = accounts.findIndex(account => account.id === targetId)
+    if (source < 0 || target < 0) return
+    const next = [...accounts]
+    const [moved] = next.splice(source, 1)
+    next.splice(target, 0, moved)
+    const ordered = next.map((account, order) => ({ ...account, order }))
+    setAccounts(ordered)
+    try {
+      await saveAccountOrder(ordered)
+    } catch (error) {
+      setAccounts(current => current === ordered ? accounts : current)
+      throw error
+    }
   }
 
   const unbindAccount = async (account: AccountRecord): Promise<void> => {
@@ -243,7 +302,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
     const action = findAction(schema, account.platform, "login")
     if (!action) throw new Error("该平台没有登录命令")
-    enqueue(account.platform, "login", buildArgs(account.platform, action, { account: account.name, headed: true }), account.name)
+    enqueue(account.platform, "login", buildArgs(account.platform, action, { account: account.name }), account.name)
   }
 
   const checkAccount = (account: AccountRecord): void => {
@@ -254,11 +313,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const checkAll = (): void => accounts.forEach(account => checkAccount(account))
 
-  const runAction = (platform: string, actionName: string, values: FormValues): string => {
+  const runAction = async (platform: string, actionName: string, values: FormValues): Promise<string> => {
     const action = findAction(schema, platform, actionName)
     if (!action) throw new Error("CLI 动作不存在")
     const args = buildArgs(platform, action, values)
-    return enqueue(platform, actionName, args, typeof values.account === "string" ? values.account : undefined)
+    let work: { id: string; values: FormValues } | undefined
+    if (actionName === "upload-video" && typeof values.file === "string") {
+      const content: WorkContent = {
+        title: String(values.title || ""), description: String(values.desc || ""), tags: String(values.tags || ""),
+        thumbnailLandscape: String(values.thumbnail_landscape || values.thumbnail || ""),
+        thumbnailPortrait: String(values.thumbnail_portrait || values.thumbnail || ""),
+        origin: String(values.originality || values.source || ""), mark: String(values.video_mark || values.declaration || ""),
+        schedule: String(values.schedule || ""),
+      }
+      const record = await prepareWork(values.file, content)
+      work = { id: record.id, values }
+    }
+    return enqueue(platform, actionName, args, typeof values.account === "string" ? values.account : undefined, work)
   }
 
   const cancelTask = async (id: string): Promise<void> => {
@@ -276,8 +347,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const reload = async () => { setRefreshKey(value => value + 1) }
 
   return <AppContext.Provider value={{
-    runtime, repoDir, schema, accounts, statuses, tasks, loading, storageError, operationError, busy,
-    setOperationError, changeRepoDir, reload, addAccount, unbindAccount, loginAccount,
+    runtime, repoDir, schema, accounts, statuses, tasks, works, loading, storageError, operationError, busy,
+    setOperationError, changeRepoDir, reload, addAccount, unbindAccount, reorderAccounts, loginAccount, prepareWork,
     checkAccount, checkAll, enqueue, runAction, cancelTask,
   }}>{children}</AppContext.Provider>
 }
