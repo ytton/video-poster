@@ -22,10 +22,15 @@
       "backgroundColor": "#f5f7f8"
     }],
     "security": {
+      "assetProtocol": {
+        "enable": true,
+        "scope": []
+      },
       "csp": {
         "default-src": "'self' customprotocol: asset:",
         "connect-src": "ipc: http://ipc.localhost",
         "img-src": "'self' asset: http://asset.localhost data:",
+        "media-src": "'self' asset: http://asset.localhost",
         "style-src": "'self' 'unsafe-inline'"
       }
     }

@@ -94,6 +94,21 @@ fn installed_root(repo_dir: Option<String>) -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
+fn prepare_video_preview(app: AppHandle, path: String) -> Result<String, String> {
+    let requested = PathBuf::from(path);
+    let file = requested.canonicalize().map_err(|error| format!("找不到视频文件：{error}"))?;
+    if !file.is_file() {
+        return Err("请选择视频文件".into());
+    }
+    let extension = file.extension().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase();
+    if !["mp4", "mov", "mkv", "webm", "avi"].contains(&extension.as_str()) {
+        return Err("请选择 MP4、MOV、MKV、WebM 或 AVI 视频文件".into());
+    }
+    app.asset_protocol_scope().allow_file(&file).map_err(|error| format!("无法预览视频：{error}"))?;
+    Ok(requested.display().to_string())
+}
+
+#[tauri::command]
 fn runtime_info(repo_dir: Option<String>) -> RuntimeInfo {
     let fallback = repo_dir.clone().filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| default_root().display().to_string());
@@ -292,7 +307,7 @@ pub fn run() {
             }));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![runtime_info, list_accounts, remove_session, cli_schema, start_cli, cancel_cli, open_bilibili_login])
+        .invoke_handler(tauri::generate_handler![runtime_info, list_accounts, remove_session, cli_schema, start_cli, cancel_cli, open_bilibili_login, prepare_video_preview])
         .build(tauri::generate_context!())
         .expect("failed to start desktop app");
     app.run(|handle, event| {

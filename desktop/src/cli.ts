@@ -35,6 +35,10 @@ export async function cancelCli(taskId: string): Promise<void> {
   return invoke("cancel_cli", { taskId })
 }
 
+export async function prepareVideoPreview(path: string): Promise<string> {
+  return inDesktop ? invoke<string>("prepare_video_preview", { path }) : path
+}
+
 export async function onCliLine(handler: (payload: TaskLineEvent) => void): Promise<UnlistenFn> {
   return listen<TaskLineEvent>("cli-line", event => handler(event.payload))
 }

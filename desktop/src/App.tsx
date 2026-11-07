@@ -14,6 +14,8 @@ import { AppProvider, useApp } from "./state"
 import { platformLabel, PLATFORM_COLORS } from "./platforms"
 import { buildArgs, findAction } from "./args"
 import { CommandFields } from "./components/CommandFields"
+import { VideoDropzone } from "./components/VideoDropzone"
+import { PublishPreview } from "./components/PublishPreview"
 import { FaultDialog } from "./components/FaultDialog"
 import { TitleBar } from "./components/TitleBar"
 import { getFaults, reportFault, subscribeFaults } from "./faults"
@@ -139,10 +141,7 @@ function PublishPage({ openTasks }: { openTasks: () => void }) {
   const [extras, setExtras] = useState<Record<string, FormValues>>({})
   const [formError, setFormError] = useState("")
   const selectedAccounts = publishable.filter(account => selected.includes(account.id))
-  const pickVideo = async () => {
-    const result = await open({ multiple: false, filters: [{ name: "视频", extensions: ["mp4", "mov", "mkv", "webm", "avi"] }] })
-    if (typeof result === "string") setFile(result)
-  }
+  const previewPlatforms = [...new Set((selectedAccounts.length ? selectedAccounts : publishable).map(account => account.platform))]
   const submit = () => {
     setFormError("")
     if (!file.trim() || !title.trim() || selectedAccounts.length === 0) {
@@ -167,12 +166,13 @@ function PublishPage({ openTasks }: { openTasks: () => void }) {
   const common = ["account", "file", "title", "desc", "tags", "schedule", "headless"]
   return <div className="flex h-full min-h-0 flex-col">
     <SectionHead title="发布视频" subtitle="选择视频和账号，逐个平台提交" right={<Button size="sm" onClick={submit} disabled={!runtime?.ready || !publishable.length}><Upload />加入发布队列</Button>} />
-    <div className="tool-scroll min-h-0 flex-1 px-5 py-4" tabIndex={0}>
-      <div className="mx-auto max-w-5xl space-y-5">
+    <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(270px,320px)]">
+    <div className="tool-scroll min-h-0 px-5 py-4" tabIndex={0}>
+      <div className="space-y-5">
         <section className="space-y-3">
           <h2 className="text-sm font-semibold">视频与文案</h2>
           <div className="grid gap-3 lg:grid-cols-2">
-            <label className="flex flex-col gap-1.5 lg:col-span-2"><span className="text-xs font-medium">视频文件 <span className="text-destructive">*</span></span><div className="flex gap-2"><Input className="min-w-0 bg-white" value={file} onChange={event => setFile(event.target.value)} placeholder="选择本地视频" /><Button type="button" variant="outline" onClick={() => void pickVideo()}><FolderOpen />浏览</Button></div></label>
+            <div className="flex flex-col gap-1.5 lg:col-span-2"><span className="text-xs font-medium">视频文件 <span className="text-destructive">*</span></span><VideoDropzone value={file} onChange={setFile} onError={setFormError} /></div>
             <label className="flex flex-col gap-1.5 lg:col-span-2"><span className="text-xs font-medium">标题 <span className="text-destructive">*</span></span><Input className="bg-white" value={title} onChange={event => setTitle(event.target.value)} placeholder="视频标题" /></label>
             <label className="flex flex-col gap-1.5 lg:col-span-2"><span className="text-xs font-medium">简介</span><Textarea className="min-h-20 bg-white" value={description} onChange={event => setDescription(event.target.value)} placeholder="视频简介" /></label>
             <label className="flex flex-col gap-1.5"><span className="text-xs font-medium">话题标签</span><Input className="bg-white" value={tags} onChange={event => setTags(event.target.value)} placeholder="用英文逗号分隔" /></label>
@@ -195,6 +195,10 @@ function PublishPage({ openTasks }: { openTasks: () => void }) {
         {schedule && selectedAccounts.some(account => !findAction(schema, account.platform, "upload-video")?.options.some(option => option.name === "schedule")) && <p className="rounded bg-amber-50 p-2 text-xs text-amber-900">部分已选平台没有定时参数，将立即发布。</p>}
         {formError && <p className="rounded bg-red-50 p-2 text-xs text-destructive">{formError}</p>}
       </div>
+    </div>
+    <PublishPreview platforms={previewPlatforms.length ? previewPlatforms : schema.filter(node => node.actions.some(action => action.name === "upload-video")).map(node => node.name)}
+      file={file} title={title} description={description} tags={tags}
+      accountName={platform => selectedAccounts.find(account => account.platform === platform)?.name || publishable.find(account => account.platform === platform)?.name || ""} />
     </div>
   </div>
 }
@@ -275,7 +279,7 @@ function AboutDialog({ open: isOpen, onOpenChange }: { open: boolean; onOpenChan
     <DialogHeader><DialogTitle>关于作者</DialogTitle><DialogDescription>视频发布台</DialogDescription></DialogHeader>
     <div className="flex items-center gap-4"><img src={authorAvatar} className="size-16 rounded-md object-cover" alt="Hoshimi星尘头像" /><div><p className="font-semibold">Hoshimi星尘</p><p className="text-xs text-muted-foreground">B站 UID 10075923</p></div></div>
     <p className="text-xs leading-5 text-muted-foreground">底层发布能力来自开源项目 social-auto-upload。本应用在本机调用已安装的 CLI。</p>
-    <div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" onClick={() => void openUrl("https://space.bilibili.com/10075923")}>打开 B站主页</Button><Button variant="outline" size="sm" onClick={() => void openUrl("https://github.com/dreammis/social-auto-upload")}>上游项目</Button></div>
+    <div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" onClick={() => void openUrl("https://space.bilibili.com/10075923")}>打开 B站主页</Button><Button variant="outline" size="sm" onClick={() => void openUrl("https://github.com/ytton/video-poster")}>项目 GitHub</Button><Button variant="outline" size="sm" onClick={() => void openUrl("https://github.com/dreammis/social-auto-upload")}>上游项目</Button></div>
   </DialogContent></Dialog>
 }
 

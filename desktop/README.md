@@ -2,12 +2,14 @@
 
 基于 Tauri 2、React 19 和 `social-auto-upload` CLI 的本地桌面工作台。Windows 安装包只提供桌面界面；发布引擎仍是本仓库的 Python 项目。
 
+项目主页：[ytton/video-poster](https://github.com/ytton/video-poster)。
+
 ## 使用
 
 1. 按上游 [`docs/install.md`](../docs/install.md) 安装仓库主线 CLI，确保项目目录内存在 `.venv/Scripts/sau.exe`、`.venv/Scripts/python.exe` 和 `conf.py`。
 2. 启动桌面程序。如果 CLI 项目不在本机的开发目录，在标题栏“设置”中选择实际的仓库目录。
 3. 在“账号”页添加账号别名并登录。B站登录会打开独立终端显示二维码。账号会话仍保存在项目 `cookies/` 中。
-4. 在“发布”页选视频与账号，按平台补齐必填项后加入队列。任务页可查看输出和结果。其他 CLI 动作在“全部命令”页。
+4. 在“发布”页将视频拖入接收框，或点击接收框选择文件；右侧可切换平台预览并播放本地视频。选账号、补齐平台必填项后加入队列。任务页可查看输出和结果，其他 CLI 动作在“全部命令”页。
 
 桌面端逐项执行任务，避免同一登录会话被并发任务争用。账号别名及任务记录存在应用的 IndexedDB 中，不复制 Cookie。关闭程序会结束正在运行的 CLI 任务；若发布途中退出，请到平台核对最终状态。
 
