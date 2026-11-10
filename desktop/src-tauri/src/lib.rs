@@ -19,6 +19,7 @@ struct BridgeState {
     port: u16,
     secret: String,
     tasks: Arc<Mutex<HashMap<String, BrowserTask>>>,
+    active_task_id: Arc<Mutex<Option<String>>>,
     app: AppHandle,
 }
 
@@ -39,6 +40,13 @@ struct BrowserTaskSummary {
     title: String,
     status: String,
     created_at: u128,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserTaskList {
+    tasks: Vec<BrowserTaskSummary>,
+    active_task_id: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -246,12 +254,26 @@ async fn list_tasks(RouteState(state): RouteState<BridgeState>, headers: HeaderM
         status: task.status.clone(), created_at: task.created_at,
     }).collect();
     result.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    Json(result).into_response()
+    let active_task_id = state.active_task_id.lock().ok().and_then(|value| value.clone());
+    Json(BrowserTaskList { tasks: result, active_task_id }).into_response()
+}
+
+#[tauri::command]
+fn set_active_browser_task(state: State<'_, BridgeState>, task_id: Option<String>) -> Result<(), String> {
+    if let Some(id) = &task_id {
+        if !state.tasks.lock().map_err(|_| "任务状态不可用")?.contains_key(id) {
+            return Err("找不到可供扩展填写的任务".into());
+        }
+    }
+    *state.active_task_id.lock().map_err(|_| "当前发布项目不可用")? = task_id;
+    Ok(())
 }
 
 #[tauri::command]
 fn cancel_browser_task(state: State<'_, BridgeState>, task_id: String) -> Result<(), String> {
     state.tasks.lock().map_err(|_| "任务状态不可用")?.remove(&task_id);
+    let mut active = state.active_task_id.lock().map_err(|_| "当前发布项目不可用")?;
+    if active.as_deref() == Some(&task_id) { *active = None; }
     Ok(())
 }
 
@@ -333,6 +355,7 @@ pub fn run() {
                 port: listener.local_addr()?.port(),
                 secret,
                 tasks: Arc::new(Mutex::new(HashMap::new())),
+                active_task_id: Arc::new(Mutex::new(None)),
                 app: app.handle().clone(),
             };
             let router = Router::new()
@@ -360,7 +383,7 @@ pub fn run() {
             }));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![bridge_info, create_browser_task, cancel_browser_task, prepare_video_preview, hash_video_file, prepare_cover_preview, save_cover_frame])
+        .invoke_handler(tauri::generate_handler![bridge_info, create_browser_task, set_active_browser_task, cancel_browser_task, prepare_video_preview, hash_video_file, prepare_cover_preview, save_cover_frame])
         .build(tauri::generate_context!())
         .expect("failed to start desktop app");
     app.run(|_, _| {});

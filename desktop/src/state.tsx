@@ -1,8 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react"
 import { openUrl } from "@tauri-apps/plugin-opener"
-import { addWorkPublication, getOrCreateWork, loadAllTasks, loadAllWorks, saveTask } from "./db"
+import { addWorkPublication, getOrCreateWork, loadAllTasks, loadAllWorks, saveTask, saveWorkPlatforms } from "./db"
 import { redact, reportFault } from "./faults"
-import { bridgeInfo, cancelBrowserTask, createBrowserTask, hashVideoFile, inDesktop, onBrowserTaskStatus, onNativeFault, type BridgeInfo, type BrowserTaskInput } from "./native"
+import { bridgeInfo, cancelBrowserTask, createBrowserTask, hashVideoFile, inDesktop, onBrowserTaskStatus, onNativeFault, setActiveBrowserTask, type BridgeInfo, type BrowserTaskInput } from "./native"
 import type { FormValues, TaskRecord, WorkContent, WorkRecord } from "./types"
 
 const LOCAL_ROOT = "local-browser"
@@ -11,13 +11,18 @@ interface AppModel {
   bridge: BridgeInfo | null
   tasks: TaskRecord[]
   works: WorkRecord[]
+  activeWorkId: string
   loading: boolean
   storageError: string
   operationError: string
   setOperationError: (message: string) => void
   reload: () => Promise<void>
   prepareWork: (filePath: string, content: WorkContent, expectedHash?: string) => Promise<WorkRecord>
-  createTask: (work: WorkRecord, input: Omit<BrowserTaskInput, "id">) => Promise<string>
+  createTask: (work: WorkRecord, input: Omit<BrowserTaskInput, "id">, openBrowser?: boolean) => Promise<string>
+  activateWork: (work: WorkRecord, includeDouyin: boolean) => Promise<void>
+  deactivateWork: () => Promise<void>
+  updateWorkPlatforms: (workId: string, platforms: string[]) => Promise<WorkRecord>
+  confirmManualPublished: (workId: string, platform: string) => Promise<void>
   confirmPublished: (id: string) => Promise<void>
   cancelTask: (id: string) => Promise<void>
 }
@@ -34,6 +39,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [bridge, setBridge] = useState<BridgeInfo | null>(null)
   const [tasks, setTasks] = useState<TaskRecord[]>([])
   const [works, setWorks] = useState<WorkRecord[]>([])
+  const [activeWorkId, setActiveWorkId] = useState(() => localStorage.getItem("active-publish-work") || "")
   const [loading, setLoading] = useState(true)
   const [storageError, setStorageError] = useState("")
   const [operationError, setOperationError] = useState("")
@@ -82,6 +88,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
       firstLoadRef.current = false
       setTasks(restored)
       setWorks(storedWorks)
+      const lockedId = localStorage.getItem("active-publish-work")
+      const activeTask = restored.find(task => task.workId === lockedId && task.platform === "douyin"
+        && !["success", "cancelled"].includes(task.status))
+      if (nextBridge) await setActiveBrowserTask(activeTask?.id || null)
+      if (lockedId && !storedWorks.some(work => work.id === lockedId)) {
+        localStorage.removeItem("active-publish-work")
+        setActiveWorkId("")
+      }
       await Promise.all(restored.filter(task => task.status === "interrupted").map(saveTask))
     } catch (error) {
       setOperationError(`读取本机记录失败：${String(error)}`)
@@ -122,7 +136,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return work
   }
 
-  const createTask = async (work: WorkRecord, input: Omit<BrowserTaskInput, "id">): Promise<string> => {
+  const createTask = async (work: WorkRecord, input: Omit<BrowserTaskInput, "id">, launchBrowser = true): Promise<string> => {
     if (!bridge) throw new Error("浏览器桥接未就绪，请重新打开软件")
     const id = crypto.randomUUID()
     const values: FormValues = {
@@ -141,17 +155,67 @@ export function AppProvider({ children }: { children: ReactNode }) {
     await saveTask(task)
     try {
       const url = await createBrowserTask({ id, ...input })
-      try {
-        await openUrl(url)
-        updateTask(id, { message: "作品已准备好，请在抖音页面点击扩展图标自动补齐" })
-      } catch (error) {
-        updateTask(id, { message: `作品已准备好，请手动打开抖音创作者中心：${String(error)}` })
+      await setActiveBrowserTask(id)
+      localStorage.setItem("active-publish-work", work.id)
+      setActiveWorkId(work.id)
+      if (launchBrowser) {
+        try {
+          await openUrl(url)
+          updateTask(id, { message: "作品已准备好，请在抖音页面点击扩展图标自动补齐" })
+        } catch (error) {
+          updateTask(id, { message: `作品已准备好，请手动打开抖音创作者中心：${String(error)}` })
+        }
+      } else {
+        updateTask(id, { message: "作品已锁定，可在抖音上传页用扩展自动填写" })
       }
       return id
     } catch (error) {
       updateTask(id, { status: "failed", finishedAt: new Date().toISOString(), message: String(error) })
       throw error
     }
+  }
+
+  const activateWork = async (work: WorkRecord, includeDouyin: boolean): Promise<void> => {
+    const pending = taskRef.current.find(task => task.workId === work.id && task.platform === "douyin"
+      && !["success", "cancelled"].includes(task.status))
+    if (includeDouyin && pending) await setActiveBrowserTask(pending.id)
+    else if (includeDouyin) {
+      const content = work.content
+      const declaration = content.origin === "reprint" ? "内容为转载信息"
+        : content.mark === "ai" ? "内容由AI生成" : content.mark === "opinion" ? "内容为个人观点或见解" : ""
+      await createTask(work, {
+        filePath: work.filePath, title: content.title, description: content.description,
+        tags: content.tags.split(/[,，]/).map(tag => tag.trim().replace(/^#/, "")).filter(Boolean),
+        declaration, thumbnailPortrait: content.thumbnailPortrait,
+        thumbnailLandscape: content.thumbnailLandscape,
+      }, false)
+    } else if (bridge) await setActiveBrowserTask(null)
+    localStorage.setItem("active-publish-work", work.id)
+    setActiveWorkId(work.id)
+  }
+
+  const deactivateWork = async (): Promise<void> => {
+    if (bridge) await setActiveBrowserTask(null)
+    localStorage.removeItem("active-publish-work")
+    setActiveWorkId("")
+  }
+
+  const updateWorkPlatforms = async (workId: string, platforms: string[]): Promise<WorkRecord> => {
+    const work = await saveWorkPlatforms(workId, platforms)
+    setWorks(previous => previous.map(item => item.id === work.id ? work : item))
+    return work
+  }
+
+  const confirmManualPublished = async (workId: string, platform: string): Promise<void> => {
+    if (platform === "douyin") throw new Error("抖音请在任务页确认发布")
+    const current = works.find(work => work.id === workId)
+    if (!current) throw new Error("找不到作品记录")
+    const work = await addWorkPublication(workId, {
+      taskId: crypto.randomUUID(), platform, accountName: "浏览器账号", publishedAt: new Date().toISOString(),
+      values: { title: current.content.title, desc: current.content.description, tags: current.content.tags,
+        thumbnail_portrait: current.content.thumbnailPortrait, thumbnail_landscape: current.content.thumbnailLandscape },
+    })
+    setWorks(previous => [work, ...previous.filter(item => item.id !== work.id)])
   }
 
   const confirmPublished = async (id: string): Promise<void> => {
@@ -174,7 +238,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }
 
   return <AppContext.Provider value={{
-    bridge, tasks, works, loading, storageError, operationError, setOperationError,
-    reload, prepareWork, createTask, confirmPublished, cancelTask,
+    bridge, tasks, works, activeWorkId, loading, storageError, operationError, setOperationError,
+    reload, prepareWork, createTask, activateWork, deactivateWork, updateWorkPlatforms, confirmManualPublished, confirmPublished, cancelTask,
   }}>{children}</AppContext.Provider>
 }

@@ -36,6 +36,10 @@ export async function createBrowserTask(input: BrowserTaskInput): Promise<string
   return invoke("create_browser_task", { input })
 }
 
+export async function setActiveBrowserTask(taskId: string | null): Promise<void> {
+  return invoke("set_active_browser_task", { taskId })
+}
+
 export async function cancelBrowserTask(taskId: string): Promise<void> {
   return invoke("cancel_browser_task", { taskId })
 }

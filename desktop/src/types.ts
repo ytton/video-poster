@@ -13,6 +13,7 @@ export interface WorkContent {
   title: string
   description: string
   tags: string
+  platforms?: string[]
   thumbnailLandscape: string
   thumbnailPortrait: string
   origin: string

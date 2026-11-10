@@ -21,7 +21,7 @@ test("version 1 records survive the works database upgrade", async () => {
   await old.put("tasks", { id: "old-task", repoRoot: "repo", status: "success" })
   old.close()
 
-  const { getOrCreateWork, loadWorks, addWorkPublication } = await import("../src/db.ts")
+  const { getOrCreateWork, loadWorks, addWorkPublication, saveWorkPlatforms } = await import("../src/db.ts")
   const upgraded = await openDB("sau-desktop", 2)
   assert.equal((await upgraded.get("tasks", "old-task")).status, "success")
   upgraded.close()
@@ -41,6 +41,8 @@ test("version 1 records survive the works database upgrade", async () => {
   const reused = await getOrCreateWork("local-browser", "sha", 123, "new-location.mp4", content)
   assert.equal(reused.id, first.id)
   assert.deepEqual(reused.publications, [publication])
+  await saveWorkPlatforms(reused.id, ["douyin", "bilibili"])
+  assert.deepEqual((await loadWorks("repo"))[0].content.platforms, ["douyin", "bilibili"])
 })
 
 test("only a successful video publishing task counts as a publication", () => {

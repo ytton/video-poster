@@ -37,7 +37,7 @@ async function render() {
     openUpload.onclick = () => void send({ type: "open-upload" })
       .then(() => window.close()).catch(error => { message.textContent = error.message })
     const result = await send({ type: "list" })
-    const { activeTaskId } = await chrome.storage.local.get("activeTaskId")
+    const { activeTaskId } = result
     list.replaceChildren()
     if (!result.tasks.length) { list.textContent = "软件中还没有待填写作品"; return }
     for (const task of result.tasks) {

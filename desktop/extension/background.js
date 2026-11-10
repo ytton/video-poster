@@ -63,7 +63,6 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         const response = await bridgeFetch(bridge, `/api/tasks/${message.task}`)
         const payload = await response.json()
         if (payload.id !== message.task) throw new Error("作品任务无效")
-        await chrome.storage.local.set({ activeTaskId: message.task })
         const tabs = await chrome.tabs.query({ url: "https://creator.douyin.com/*" })
         const existing = tabs.sort((a, b) =>
           Number(b.url?.includes("/content/")) - Number(a.url?.includes("/content/"))
@@ -81,7 +80,8 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     if (message?.type === "list") {
       const bridge = await bridgeConnection()
       const response = await bridgeFetch(bridge, "/api/tasks")
-      return { ok: true, tasks: await response.json() }
+      const listing = await response.json()
+      return { ok: true, tasks: listing.tasks, activeTaskId: listing.activeTaskId }
     }
     if (message?.type === "start") {
       if (sender.tab) throw new Error("请从扩展弹窗选择作品")

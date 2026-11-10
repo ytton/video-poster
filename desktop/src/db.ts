@@ -89,6 +89,16 @@ export async function getOrCreateWork(repoRoot: string, sha256: string, bytes: n
   return work
 }
 
+export async function saveWorkPlatforms(workId: string, platforms: string[]): Promise<WorkRecord> {
+  const transaction = (await database).transaction("works", "readwrite")
+  const work = await transaction.store.get(workId)
+  if (!work) throw new Error("找不到作品记录")
+  const updated = { ...work, content: { ...work.content, platforms: [...platforms] }, updatedAt: new Date().toISOString() }
+  await transaction.store.put(updated)
+  await transaction.done
+  return updated
+}
+
 export async function addWorkPublication(workId: string, publication: WorkPublication): Promise<WorkRecord> {
   const transaction = (await database).transaction("works", "readwrite")
   const work = await transaction.store.get(workId)

@@ -1,7 +1,7 @@
 import { Component, useEffect, useState, useSyncExternalStore, type ErrorInfo, type ReactNode } from "react"
 import { convertFileSrc } from "@tauri-apps/api/core"
 import { openUrl } from "@tauri-apps/plugin-opener"
-import { Check, CircleAlert, CircleHelp, Clapperboard, Copy, ExternalLink, History, Plus, Puzzle, RefreshCw, Send, Upload, X } from "lucide-react"
+import { Check, CircleAlert, CircleHelp, Clapperboard, Copy, ExternalLink, Globe2, History, LockKeyhole, Plus, Puzzle, RefreshCw, Send, Upload, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -12,7 +12,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { AppProvider, useApp } from "./state"
 import { inDesktop, prepareCoverPreview, prepareVideoPreview } from "./native"
-import { CREATOR_PAGES, fieldLabel, platformLabel, PLATFORM_COLORS } from "./platforms"
+import { CREATOR_PAGES, platformLabel, PLATFORM_COLORS } from "./platforms"
 import { VideoDropzone } from "./components/VideoDropzone"
 import { CoverDropzone } from "./components/CoverDropzone"
 import { VideoFramePicker } from "./components/VideoFramePicker"
@@ -23,10 +23,11 @@ import { getFaults, reportFault, subscribeFaults } from "./faults"
 import type { TaskRecord, WorkRecord } from "./types"
 import authorAvatar from "./assets/author.jpg"
 
-type Page = "publish" | "works" | "tasks" | "extension"
+type Page = "publish" | "works" | "platforms" | "tasks" | "extension"
 const mainPages: { id: Page; label: string; icon: typeof Send }[] = [
   { id: "works", label: "作品管理", icon: Clapperboard },
   { id: "publish", label: "新建作品", icon: Plus },
+  { id: "platforms", label: "平台", icon: Globe2 },
   { id: "tasks", label: "任务", icon: History },
   { id: "extension", label: "浏览器扩展", icon: Puzzle },
 ]
@@ -56,19 +57,6 @@ function SectionHead({ title, right, subtitle }: { title: string; right?: ReactN
   </div>
 }
 
-function WorkCover({ path, label, ratio }: { path: string; label: string; ratio: "3/4" | "4/3" }) {
-  const [url, setUrl] = useState("")
-  useEffect(() => {
-    let active = true
-    setUrl("")
-    if (path && inDesktop) void prepareCoverPreview(path).then(prepared => { if (active) setUrl(convertFileSrc(prepared)) }).catch(() => {})
-    return () => { active = false }
-  }, [path])
-  return <div><p className="text-xs text-muted-foreground">{label}</p><div style={{ aspectRatio: ratio }} className="mt-1 grid h-28 place-items-center overflow-hidden rounded border border-border bg-muted text-xs text-muted-foreground">
-    {url ? <img src={url} alt={`${label}封面`} className="h-full w-full object-cover" /> : path ? "图片不可用" : "未设置"}
-  </div></div>
-}
-
 function WorkThumbnail({ work }: { work: WorkRecord }) {
   const [url, setUrl] = useState("")
   const path = work.content.thumbnailPortrait || work.content.thumbnailLandscape
@@ -83,26 +71,16 @@ function WorkThumbnail({ work }: { work: WorkRecord }) {
   </span>
 }
 
-function WorkVideo({ path }: { path: string }) {
-  const [url, setUrl] = useState("")
-  useEffect(() => {
-    let active = true
-    setUrl("")
-    if (path && inDesktop) void prepareVideoPreview(path).then(prepared => { if (active) setUrl(convertFileSrc(prepared)) }).catch(() => {})
-    return () => { active = false }
-  }, [path])
-  return url ? <video src={url} controls preload="metadata" className="mt-4 aspect-video max-h-72 w-full bg-black object-contain" />
-    : <div className="mt-4 grid aspect-video max-h-72 place-items-center bg-muted text-xs text-muted-foreground">原视频不可用</div>
-}
-
 function Empty({ icon: Icon, title, detail }: { icon: typeof Send; title: string; detail?: string }) {
   return <div className="flex h-full min-h-48 flex-col items-center justify-center gap-2 text-center text-muted-foreground">
     <Icon className="size-7 opacity-50" strokeWidth={1.5} /><p className="font-medium text-foreground">{title}</p>{detail && <p className="text-xs">{detail}</p>}
   </div>
 }
 
-function PublishPage({ onPublished, initialWork }: { onPublished: (id: string) => void; initialWork?: WorkRecord }) {
-  const { bridge, prepareWork, createTask } = useApp()
+function PublishPage({ onPublished, initialWork, selectedPlatforms, openPlatforms }: {
+  onPublished: (id: string) => void; initialWork?: WorkRecord; selectedPlatforms: string[]; openPlatforms: () => void
+}) {
+  const { bridge, tasks, prepareWork, createTask, activateWork, confirmPublished, confirmManualPublished, setOperationError } = useApp()
   const [file, setFile] = useState("")
   const [title, setTitle] = useState(initialWork?.content.title || "")
   const [description, setDescription] = useState(initialWork?.content.description || "")
@@ -115,7 +93,9 @@ function PublishPage({ onPublished, initialWork }: { onPublished: (id: string) =
   const [mark, setMark] = useState(["ai", "opinion"].includes(initialWork?.content.mark || "") ? initialWork!.content.mark : "none")
   const [formError, setFormError] = useState("")
   const [submitting, setSubmitting] = useState(false)
-  const [douyinSelected, setDouyinSelected] = useState(true)
+  const [confirmingPlatform, setConfirmingPlatform] = useState("")
+  const completed = new Set(initialWork?.publications.map(item => item.platform) || [])
+  const douyinTask = tasks.find(task => task.workId === initialWork?.id && task.platform === "douyin" && task.status !== "cancelled")
 
   useEffect(() => {
     if (!initialWork) return
@@ -146,30 +126,48 @@ function PublishPage({ onPublished, initialWork }: { onPublished: (id: string) =
   const submit = async () => {
     setFormError("")
     if (!file || !title.trim()) { setFormError("请选择视频并填写标题"); return }
-    if (!douyinSelected) { setFormError("请至少选择一个发布平台"); return }
-    if (title.trim().length > 30) { setFormError("抖音标题最多 30 字"); return }
-    if (origin === "reprint" && mark !== "none") { setFormError("转载与其他内容声明不能同时设置"); return }
+    if (!selectedPlatforms.length) { setFormError("请先到平台页选择发布平台"); return }
+    if (selectedPlatforms.includes("douyin") && title.trim().length > 30) { setFormError("抖音标题最多 30 字"); return }
+    if (selectedPlatforms.includes("douyin") && origin === "reprint" && mark !== "none") { setFormError("转载与其他内容声明不能同时设置"); return }
     setSubmitting(true)
     try {
       const normalizedTags = tags.split(/[,，]/).map(tag => tag.trim().replace(/^#/, "")).filter(Boolean)
       const work = await prepareWork(file, {
-        title: title.trim(), description, tags: normalizedTags.join(","), thumbnailLandscape,
+        title: title.trim(), description, tags: normalizedTags.join(","), platforms: selectedPlatforms, thumbnailLandscape,
         thumbnailPortrait, origin, mark, schedule: "",
       }, initialWork?.sha256)
-      await createTask(work, {
-        filePath: file, title: title.trim(), description, tags: normalizedTags, declaration,
-        thumbnailPortrait, thumbnailLandscape,
-      })
+      if (selectedPlatforms.includes("douyin")) {
+        await createTask(work, {
+          filePath: file, title: title.trim(), description, tags: normalizedTags, declaration,
+          thumbnailPortrait, thumbnailLandscape,
+        })
+      } else await activateWork(work, false)
+      for (const platform of selectedPlatforms.filter(item => item !== "douyin")) {
+        try { await openUrl(CREATOR_PAGES[platform].url) }
+        catch (error) { setOperationError(`无法打开${platformLabel(platform)}后台：${String(error)}`) }
+      }
       onPublished(work.id)
     } catch (error) {
       setFormError(String(error))
     } finally { setSubmitting(false) }
   }
 
+  const confirmPlatform = async (platform: string) => {
+    if (!initialWork || !window.confirm(`确认已在${platformLabel(platform)}后台看到这部作品发布成功？`)) return
+    setConfirmingPlatform(platform)
+    try {
+      if (platform === "douyin") {
+        if (!douyinTask) throw new Error("找不到抖音待确认任务")
+        await confirmPublished(douyinTask.id)
+      } else await confirmManualPublished(initialWork.id, platform)
+    } catch (error) { setOperationError(String(error)) }
+    finally { setConfirmingPlatform("") }
+  }
+
   return <div className="flex h-full min-h-0 flex-col">
     <SectionHead title={initialWork ? "编辑作品" : "新建作品"}
       subtitle="保存作品资料后打开所选平台的创作者中心"
-      right={<Button size="sm" onClick={() => void submit()} disabled={!bridge || submitting}><Upload />{submitting ? "正在保存" : "发布"}</Button>} />
+      right={<Button size="sm" onClick={() => void submit()} disabled={(selectedPlatforms.includes("douyin") && !bridge) || submitting}><Upload />{submitting ? "正在保存" : "发布"}</Button>} />
     <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(270px,320px)]">
       <div className="tool-scroll min-h-0 px-5 py-4" tabIndex={0}><div className="space-y-5">
         <section className="space-y-3"><h2 className="text-sm font-semibold">视频与文案</h2>
@@ -190,14 +188,27 @@ function PublishPage({ onPublished, initialWork }: { onPublished: (id: string) =
             <label className="flex min-w-0 flex-col gap-1.5"><span className="text-xs font-medium">内容声明</span><Select value={mark} onValueChange={setMark}><SelectTrigger className="w-full bg-white"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="none">无需标注</SelectItem><SelectItem value="ai">AI 生成</SelectItem><SelectItem value="opinion">个人观点</SelectItem></SelectContent></Select></label>
           </div>
         </section>
-        <section className="space-y-2 border-t border-border pt-4"><h2 className="text-sm font-semibold">发布平台</h2>
-          <label className="flex items-center gap-3 rounded-md border border-border bg-white px-3 py-2 text-sm"><Checkbox checked={douyinSelected} onCheckedChange={value => setDouyinSelected(value === true)} />
-            <PlatformMark platform="douyin" /><span className="flex-1">抖音</span><span className="text-xs text-muted-foreground">浏览器扩展已适配</span></label>
+        <section className="space-y-2 border-t border-border pt-4"><div className="flex items-center justify-between gap-3"><h2 className="text-sm font-semibold">发布平台</h2>
+          <Button size="sm" variant="ghost" onClick={openPlatforms}>选择平台</Button></div>
+          {!selectedPlatforms.length && <p className="text-xs text-muted-foreground">尚未选择发布平台</p>}
+          <div className="divide-y divide-border border-y border-border bg-white">{selectedPlatforms.map(platform => {
+            const done = completed.has(platform)
+            const canConfirm = !!initialWork && !done && (platform !== "douyin" || douyinTask?.status === "prepared")
+            return <div key={platform} className="flex min-h-11 items-center gap-2 px-2.5 py-1.5 text-xs">
+              <PlatformMark platform={platform} /><span className="min-w-0 flex-1 font-medium">{platformLabel(platform)}</span>
+              <span className={done ? "text-emerald-700" : "text-muted-foreground"}>{done ? "已确认发布" : platform === "douyin" && douyinTask ? douyinTask.status === "prepared" ? "待确认" : "待填写" : "待发布"}</span>
+              {canConfirm && <Button size="sm" variant="ghost" disabled={confirmingPlatform === platform} onClick={() => void confirmPlatform(platform)}><Check />确认</Button>}
+              <Button size="icon-sm" variant="ghost" title={`打开${platformLabel(platform)}${CREATOR_PAGES[platform].label}`} aria-label={`打开${platformLabel(platform)}${CREATOR_PAGES[platform].label}`}
+                onClick={() => void openUrl(CREATOR_PAGES[platform].url).catch(error => setOperationError(String(error)))}><ExternalLink /></Button>
+            </div>
+          })}</div>
+          {initialWork && [...completed].filter(platform => !selectedPlatforms.includes(platform)).map(platform =>
+            <p key={platform} className="text-xs text-emerald-700">{platformLabel(platform)}已确认发布</p>)}
         </section>
         {formError && <p className="rounded bg-red-50 p-3 text-xs text-destructive">{formError}</p>}
       </div>
       </div>
-      <PublishPreview platforms={["douyin"]} file={file} title={title} description={description} tags={tags}
+      <PublishPreview platforms={selectedPlatforms.length ? selectedPlatforms : ["douyin"]} file={file} title={title} description={description} tags={tags}
         onVideoOrientationChange={() => {}}
         coverForPlatform={(_, orientation) => orientation === "landscape" ? thumbnailLandscape : thumbnailPortrait}
         accountName={() => "浏览器账号"} />
@@ -208,58 +219,58 @@ function PublishPage({ onPublished, initialWork }: { onPublished: (id: string) =
   </div>
 }
 
-function WorksPage({ onReuse, onNew, openTask, focusedWorkId }: { onReuse: (id: string) => void; onNew: () => void; openTask: (id: string) => void; focusedWorkId: string }) {
-  const { works, tasks, setOperationError } = useApp()
+function WorksPage({ onReuse, onNew, selectedPlatforms }: { onReuse: (id: string) => void; onNew: () => void; selectedPlatforms: string[] }) {
+  const { works, activeWorkId, activateWork, deactivateWork, setOperationError } = useApp()
   const [query, setQuery] = useState("")
-  const [selectedId, setSelectedId] = useState(focusedWorkId)
   const visible = works.filter(work => `${work.content.title} ${work.filePath} ${work.sha256}`.toLowerCase().includes(query.toLowerCase()))
-  const selected = visible.find(work => work.id === selectedId) || visible[0]
-  const related = tasks.filter(task => task.workId === selected?.id)
+  const toggleLock = async (work: WorkRecord) => {
+    try {
+      if (activeWorkId === work.id) await deactivateWork()
+      else await activateWork(work, (work.content.platforms || selectedPlatforms).includes("douyin"))
+    } catch (error) { setOperationError(`无法锁定作品：${String(error)}`) }
+  }
   return <div className="flex h-full min-h-0 flex-col">
     <SectionHead title="作品管理" subtitle={`${works.length} 部视频 · 按文件 SHA-256 归档`}
       right={<Button size="sm" onClick={onNew}><Plus />新建作品</Button>} />
     <div className="shrink-0 border-b border-border px-5 py-3"><Input className="max-w-md bg-white" value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索标题、文件或哈希" aria-label="搜索作品" /></div>
     {!visible.length ? <Empty icon={Clapperboard} title={works.length ? "没有匹配的作品" : "暂无作品"} detail="新建作品并填写视频资料" /> :
-      <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(320px,36%)]">
-        <div className="tool-scroll min-h-0 border-r border-border p-4" tabIndex={0}>
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(140px,152px))] content-start gap-3">{visible.map(work => <div key={work.id}
-            className={`group relative min-w-0 overflow-hidden rounded border bg-muted ${selected?.id === work.id ? "border-primary" : "border-border"}`}>
-            <button type="button" onClick={() => onReuse(work.id)} title={`编辑 ${work.content.title || "未命名视频"}`}
-              className="relative block aspect-[3/4] w-full text-left focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring">
-              <WorkThumbnail work={work} />
-              <span className="absolute inset-x-0 bottom-0 min-h-16 bg-black/75 px-2.5 py-2 text-white">
-                <span className="line-clamp-2 break-words text-xs font-semibold leading-4">{work.content.title || "未命名视频"}</span>
-                <span className="mt-1 block truncate text-[11px] text-white/80">已发布 {new Set(work.publications.map(item => item.platform)).size} 个平台</span>
-              </span>
-            </button>
-            <Button size="icon-sm" variant="ghost" title="查看作品记录" aria-label={`查看 ${work.content.title || "未命名视频"} 的记录`}
-              className="absolute right-2 top-2 bg-white/95 shadow-sm hover:bg-white" onClick={() => setSelectedId(work.id)}><History /></Button>
-          </div>)}</div>
-        </div>
-        {selected && <div className="tool-scroll min-h-0 px-5 py-4" tabIndex={0}>
-          <div className="flex items-start justify-between gap-4 border-b border-border pb-4"><div className="min-w-0"><h2 className="break-words text-lg font-semibold">{selected.content.title || "未命名视频"}</h2>
-            <p className="mt-1 break-all text-xs text-muted-foreground">{selected.filePath}</p><p className="mt-1 break-all font-mono text-[11px] text-muted-foreground">SHA-256 {selected.sha256}</p></div>
-            <Button size="sm" onClick={() => onReuse(selected.id)}><Upload />编辑并发布</Button></div>
-          <WorkVideo path={selected.filePath} />
-          <div className="grid gap-3 border-b border-border py-4 text-sm">
-            <div><p className="text-xs text-muted-foreground">简介</p><p className="mt-1 whitespace-pre-wrap break-words">{selected.content.description || "未填写"}</p></div>
-            <div><p className="text-xs text-muted-foreground">话题标签</p><p className="mt-1 break-words">{selected.content.tags || "未填写"}</p></div>
-            <div><p className="text-xs text-muted-foreground">版权归属 / 内容标记</p><p className="mt-1">{selected.content.origin === "reprint" ? "转载" : "原创"} / {selected.content.mark === "ai" ? "AI 生成" : selected.content.mark === "opinion" ? "个人观点" : "无需标注"}</p></div>
-            <div className="flex gap-3"><WorkCover path={selected.content.thumbnailPortrait} label="竖版封面" ratio="3/4" /><WorkCover path={selected.content.thumbnailLandscape} label="横版封面" ratio="4/3" /></div>
-          </div>
-          <div className="border-b border-border py-4"><h3 className="text-sm font-semibold">本机任务</h3>{related.length ? <div className="mt-2 divide-y divide-border">{related.map(task =>
-            <button key={task.id} className="flex w-full items-center gap-3 py-2 text-left text-xs" onClick={() => openTask(task.id)}><PlatformMark platform={task.platform} /><span className="min-w-0 flex-1 truncate">{new Date(task.startedAt).toLocaleString()} · {task.message}</span><StatusTag status={task.status} /></button>)}</div>
-            : <p className="mt-2 text-xs text-muted-foreground">暂无任务记录</p>}</div>
-          <div className="py-4"><h3 className="text-sm font-semibold">已确认发布的平台 ({new Set(selected.publications.map(item => item.platform)).size})</h3>
-            {selected.publications.length ? <div className="mt-2 divide-y divide-border">{[...selected.publications].reverse().map(item => <div key={item.taskId} className="py-3">
-              <div className="flex items-center gap-3"><PlatformMark platform={item.platform} /><span className="min-w-0 flex-1 text-sm">{platformLabel(item.platform)} · {new Date(item.publishedAt).toLocaleString()}</span>
-                <Button size="icon-sm" variant="ghost" title="打开创作者后台" onClick={() => void openUrl(CREATOR_PAGES[item.platform]?.url || "https://creator.douyin.com/").catch(error => setOperationError(String(error)))}><ExternalLink /></Button></div>
-              <details className="ml-10 mt-2 text-xs"><summary className="cursor-pointer text-primary">查看当次资料</summary><div className="mt-2 grid gap-2 sm:grid-cols-2">{Object.entries(item.values).filter(([name, value]) => name !== "file" && value !== "").map(([name, value]) =>
-                <div key={name}><span className="text-muted-foreground">{fieldLabel(name)}：</span><span className="break-all">{Array.isArray(value) ? value.join("、") : String(value)}</span></div>)}</div></details>
-            </div>)}</div> : <p className="mt-2 text-xs text-muted-foreground">填写完成不计入发布；需在抖音发布后手动确认。</p>}
-          </div>
-        </div>}
+      <div className="tool-scroll min-h-0 flex-1 p-4" tabIndex={0}>
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(140px,152px))] content-start gap-3">{visible.map(work => <div key={work.id}
+          className={`group relative min-w-0 overflow-hidden rounded border bg-muted ${activeWorkId === work.id ? "border-primary ring-1 ring-primary" : "border-border"}`}>
+          <button type="button" onClick={() => onReuse(work.id)} title={`编辑 ${work.content.title || "未命名视频"}`}
+            className="relative block aspect-[3/4] w-full text-left focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring">
+            <WorkThumbnail work={work} />
+            <span className="absolute inset-x-0 bottom-0 min-h-16 bg-black/75 px-2.5 py-2 text-white">
+              <span className="line-clamp-2 break-words text-xs font-semibold leading-4">{work.content.title || "未命名视频"}</span>
+              <span className="mt-1 block truncate text-[11px] text-white/80">已发布 {new Set(work.publications.map(item => item.platform)).size} 个平台</span>
+            </span>
+          </button>
+          <Button size="icon-sm" variant="ghost" title={activeWorkId === work.id ? "取消锁定" : "锁定为当前发布项目"}
+            aria-pressed={activeWorkId === work.id}
+            aria-label={`${activeWorkId === work.id ? "取消锁定" : "锁定"} ${work.content.title || "未命名视频"}`}
+            className="absolute right-2 top-2 bg-white/95 shadow-sm hover:bg-white" onClick={() => void toggleLock(work)}><LockKeyhole /></Button>
+        </div>)}</div>
       </div>}
+  </div>
+}
+
+function PlatformsPage({ selected, onChange }: { selected: string[]; onChange: (platforms: string[]) => void }) {
+  const { setOperationError } = useApp()
+  return <div className="flex h-full min-h-0 flex-col">
+    <SectionHead title="平台" subtitle={`已选择 ${selected.length} 个平台`} />
+    <div className="tool-scroll min-h-0 flex-1 px-5 py-4" tabIndex={0}>
+      <div className="max-w-3xl divide-y divide-border border-y border-border bg-white">{Object.entries(CREATOR_PAGES).map(([id, page]) => {
+        const checked = selected.includes(id)
+        return <div key={id} className="flex min-h-14 items-center gap-3 px-3 py-2">
+          <Checkbox id={`platform-${id}`} checked={checked} onCheckedChange={value => onChange(value === true ? [...selected, id] : selected.filter(item => item !== id))} />
+          <label htmlFor={`platform-${id}`} className="flex min-w-0 flex-1 cursor-pointer items-center gap-3"><PlatformMark platform={id} />
+            <span className="min-w-0"><span className="block text-sm font-medium">{platformLabel(id)}</span>
+              <span className="block text-xs text-muted-foreground">{id === "douyin" ? "扩展自动填写，确认后计入已发布" : `${page.label} · 发布后手动确认`}</span></span></label>
+          <Button size="sm" variant="outline" onClick={() => void openUrl(page.url).catch(error => setOperationError(`无法打开${platformLabel(id)}${page.label}：${String(error)}`))}>
+            <ExternalLink />打开{page.label}</Button>
+        </div>
+      })}</div>
+    </div>
   </div>
 }
 
@@ -338,28 +349,61 @@ function AboutDialog({ open: isOpen, onOpenChange }: { open: boolean; onOpenChan
   </DialogContent></Dialog>
 }
 
+function savedPlatforms(): string[] {
+  try {
+    const value = JSON.parse(localStorage.getItem("selected-publish-platforms") || '["douyin"]')
+    return Array.isArray(value) ? [...new Set(value.filter((id): id is string => typeof id === "string" && id in CREATOR_PAGES))] : ["douyin"]
+  } catch { return ["douyin"] }
+}
+
 function Shell() {
-  const { bridge, loading, tasks, works, operationError, setOperationError, storageError } = useApp()
+  const { bridge, loading, tasks, works, activeWorkId, activateWork, updateWorkPlatforms, operationError, setOperationError, storageError } = useApp()
   const [page, setPage] = useState<Page>("works")
   const [reuseWorkId, setReuseWorkId] = useState("")
-  const [focusedWorkId, setFocusedWorkId] = useState("")
-  const [focusedTaskId, setFocusedTaskId] = useState("")
+  const [selectedPlatforms, setSelectedPlatforms] = useState(savedPlatforms)
+  const [platformsForEditor, setPlatformsForEditor] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [aboutOpen, setAboutOpen] = useState(false)
   const [faultOpen, setFaultOpen] = useState(false)
   const faults = useSyncExternalStore(subscribeFaults, getFaults)
   useEffect(() => { if (faults.length) setFaultOpen(true) }, [faults.length])
+  const changePlatforms = (platforms: string[]) => {
+    localStorage.setItem("selected-publish-platforms", JSON.stringify(platforms))
+    setSelectedPlatforms(platforms)
+    const targetId = platformsForEditor ? reuseWorkId : activeWorkId
+    const target = works.find(work => work.id === targetId)
+    if (target) void updateWorkPlatforms(target.id, platforms)
+      .then(work => targetId === activeWorkId ? activateWork(work, platforms.includes("douyin")) : undefined)
+      .catch(error => setOperationError(`无法更新当前发布项目：${String(error)}`))
+  }
   const pending = tasks.filter(task => task.status === "running" || task.status === "queued").length
   return <TooltipProvider><div className="flex h-full flex-col"><TitleBar onSettings={() => setSettingsOpen(true)} />
     <div className="flex min-h-0 flex-1"><aside className="flex w-48 shrink-0 flex-col border-r border-border bg-[#eef2f3] p-2">
-      <nav className="space-y-1">{mainPages.map(item => <button key={item.id} type="button" onClick={() => { if (item.id === "publish") setReuseWorkId(""); setPage(item.id) }}
-        className={`flex h-9 w-full items-center gap-3 rounded-md px-3 text-left text-sm ${page === item.id ? "bg-white font-semibold text-primary shadow-sm" : "text-foreground hover:bg-white/70"}`}><item.icon className="size-4" />{item.label}{item.id === "tasks" && pending > 0 && <span className="ml-auto rounded bg-primary px-1.5 text-[10px] text-white">{pending}</span>}</button>)}</nav>
+      <nav className="space-y-1">{mainPages.map(item => <button key={item.id} type="button" onClick={() => {
+        if (item.id === "publish" && page !== "platforms") { setReuseWorkId(""); setSelectedPlatforms(savedPlatforms()) }
+        if (item.id === "platforms" && page !== "platforms") {
+          setPlatformsForEditor(page === "publish")
+          if (page !== "publish") {
+            setReuseWorkId("")
+            setSelectedPlatforms(works.find(work => work.id === activeWorkId)?.content.platforms || savedPlatforms())
+          }
+        }
+        setPage(item.id)
+      }}
+        className={`flex h-9 w-full items-center gap-3 rounded-md px-3 text-left text-sm ${page === item.id ? "bg-white font-semibold text-primary shadow-sm" : "text-foreground hover:bg-white/70"}`}><item.icon className="size-4" />
+        {item.id === "publish" && reuseWorkId && (page === "publish" || page === "platforms" && platformsForEditor) ? "编辑作品" : item.label}
+        {item.id === "tasks" && pending > 0 && <span className="ml-auto rounded bg-primary px-1.5 text-[10px] text-white">{pending}</span>}</button>)}</nav>
       <div className="mt-auto space-y-2 px-2 pb-2"><div className="rounded-md border border-border bg-white p-2"><div className="flex items-center gap-2 text-xs font-medium">
         <span className={`size-1.5 rounded-full ${bridge ? "bg-emerald-600" : "bg-amber-600"}`} />{loading ? "连接中" : bridge ? "浏览器桥接就绪" : "桥接不可用"}</div>
         <p className="mt-1 text-xs text-muted-foreground">抖音适配 · {pending} 项进行中</p></div><button onClick={() => setAboutOpen(true)} className="flex h-8 w-full items-center gap-2 rounded px-2 text-xs text-muted-foreground hover:bg-white"><CircleHelp className="size-4" />关于作者</button></div>
-    </aside><main className="min-w-0 flex-1">{page === "publish" ? <PublishPage key={reuseWorkId || "new"} initialWork={works.find(work => work.id === reuseWorkId)} onPublished={id => { setFocusedWorkId(id); setPage("works") }} />
-      : page === "works" ? <WorksPage focusedWorkId={focusedWorkId} onNew={() => { setReuseWorkId(""); setPage("publish") }} onReuse={id => { setReuseWorkId(id); setPage("publish") }} openTask={id => { setFocusedTaskId(id); setPage("tasks") }} />
-      : page === "tasks" ? <TasksPage focusedTaskId={focusedTaskId} /> : <ExtensionPage />}</main></div>
+    </aside><main className="min-w-0 flex-1">
+      {(page === "publish" || page === "platforms") && <div className={page === "publish" ? "h-full" : "hidden"}>
+        <PublishPage key={reuseWorkId || "new"} initialWork={works.find(work => work.id === reuseWorkId)} selectedPlatforms={selectedPlatforms}
+          openPlatforms={() => { setPlatformsForEditor(true); setPage("platforms") }} onPublished={() => setPage("works")} /></div>}
+      {page === "works" ? <WorksPage selectedPlatforms={selectedPlatforms} onNew={() => { setReuseWorkId(""); setSelectedPlatforms(savedPlatforms()); setPage("publish") }}
+        onReuse={id => { setReuseWorkId(id); setSelectedPlatforms(works.find(work => work.id === id)?.content.platforms || savedPlatforms()); setPage("publish") }} />
+        : page === "platforms" ? <PlatformsPage selected={selectedPlatforms} onChange={changePlatforms} />
+        : page === "tasks" ? <TasksPage focusedTaskId="" /> : page === "extension" ? <ExtensionPage /> : null}</main></div>
     {(operationError || storageError) && <div className="flex shrink-0 items-center gap-2 border-t border-red-100 bg-red-50 px-4 py-2 text-xs text-destructive"><CircleAlert className="size-4" /><span className="min-w-0 flex-1 truncate">{operationError || storageError}</span><button title="关闭提示" onClick={() => setOperationError("")}><X className="size-4" /></button></div>}
     <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} openFaults={() => setFaultOpen(true)} /><AboutDialog open={aboutOpen} onOpenChange={setAboutOpen} /><FaultDialog open={faultOpen} onOpenChange={setFaultOpen} />
   </div></TooltipProvider>
