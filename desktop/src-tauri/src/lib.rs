@@ -28,6 +28,17 @@ struct BrowserTask {
     video: PathBuf,
     portrait: Option<PathBuf>,
     landscape: Option<PathBuf>,
+    status: String,
+    created_at: u128,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserTaskSummary {
+    id: String,
+    title: String,
+    status: String,
+    created_at: u128,
 }
 
 #[derive(Clone, Serialize)]
@@ -63,6 +74,7 @@ struct BrowserTaskInput {
     declaration: String,
     thumbnail_portrait: String,
     thumbnail_landscape: String,
+    initial_status: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -78,6 +90,7 @@ struct BrowserTaskStatus {
 struct BridgeInfo {
     extension_path: String,
     port: u16,
+    pair_url: String,
 }
 
 #[derive(Serialize)]
@@ -167,6 +180,8 @@ const EXTENSION_FILES: &[(&str, &str)] = &[
     ("background.js", include_str!("../../extension/background.js")),
     ("connect.js", include_str!("../../extension/connect.js")),
     ("douyin.js", include_str!("../../extension/douyin.js")),
+    ("popup.html", include_str!("../../extension/popup.html")),
+    ("popup.js", include_str!("../../extension/popup.js")),
 ];
 
 #[tauri::command]
@@ -179,7 +194,17 @@ fn bridge_info(app: AppHandle, state: State<'_, BridgeState>) -> Result<BridgeIn
             fs::write(&path, content).map_err(|error| format!("无法写入浏览器扩展：{error}"))?;
         }
     }
-    Ok(BridgeInfo { extension_path: folder.display().to_string(), port: state.port })
+    let extension_path = if cfg!(debug_assertions) {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../extension")
+            .canonicalize().unwrap_or(folder).display().to_string()
+    } else {
+        folder.display().to_string()
+    };
+    Ok(BridgeInfo {
+        extension_path,
+        port: state.port,
+        pair_url: format!("http://127.0.0.1:{}/connect#token={}", state.port, state.secret),
+    })
 }
 
 #[tauri::command]
@@ -203,9 +228,25 @@ fn create_browser_task(state: State<'_, BridgeState>, input: BrowserTaskInput) -
         landscape: landscape.as_ref().map(|path| asset(path, format!("{base}/landscape"))).transpose()?,
     };
     let mut tasks = state.tasks.lock().map_err(|_| "任务状态不可用")?;
-    if tasks.contains_key(&input.id) { return Err("任务编号重复".into()); }
-    tasks.insert(input.id.clone(), BrowserTask { payload, video, portrait, landscape });
+    if !tasks.contains_key(&input.id) {
+        let created_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| error.to_string())?.as_millis();
+        let status = input.initial_status.filter(|value| ["queued", "opened", "uploading", "filling", "failed", "prepared"].contains(&value.as_str()))
+            .unwrap_or_else(|| "queued".into());
+        tasks.insert(input.id.clone(), BrowserTask { payload, video, portrait, landscape, status, created_at });
+    }
     Ok(format!("http://127.0.0.1:{}/connect#task={}&token={}", state.port, input.id, state.secret))
+}
+
+async fn list_tasks(RouteState(state): RouteState<BridgeState>, headers: HeaderMap) -> Response {
+    if !authorized(&headers, &state) { return StatusCode::UNAUTHORIZED.into_response(); }
+    let Ok(tasks) = state.tasks.lock() else { return StatusCode::INTERNAL_SERVER_ERROR.into_response(); };
+    let mut result: Vec<_> = tasks.values().map(|task| BrowserTaskSummary {
+        id: task.payload.id.clone(), title: task.payload.title.clone(),
+        status: task.status.clone(), created_at: task.created_at,
+    }).collect();
+    result.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Json(result).into_response()
 }
 
 #[tauri::command]
@@ -230,7 +271,7 @@ async fn cors(request: Request<Body>, next: Next) -> Response {
 }
 
 async fn connect_page() -> Html<&'static str> {
-    Html("<!doctype html><html lang=zh-CN><meta charset=utf-8><title>连接视频发布台</title><style>body{font:15px system-ui;margin:15vh auto;max-width:560px;color:#253238}h1{font-size:22px}p{line-height:1.7}</style><h1>正在连接视频发布台扩展</h1><p>如果页面没有跳转，请在当前默认浏览器中安装并启用“视频发布台”扩展，然后重新从桌面程序打开发布页。当前扩展支持 Chrome 和 Edge。</p><p>登录抖音后，扩展会填写视频资料。最终发布由你在抖音页面确认。</p></html>")
+    Html("<!doctype html><html lang=zh-CN><meta charset=utf-8><title>连接视频发布台</title><style>body{font:15px system-ui;margin:15vh auto;max-width:560px;color:#253238}h1{font-size:22px}p{line-height:1.7}</style><h1>正在连接视频发布台扩展</h1><p>如未出现连接成功提示，请确认已在当前 Chrome 或 Edge 中加载视频发布台扩展。</p><p>连接后可关闭此页，在抖音发布页点击扩展图标选择作品。最终发布由你在平台页面确认。</p></html>")
 }
 
 async fn get_task(RouteState(state): RouteState<BridgeState>, RoutePath(id): RoutePath<String>, headers: HeaderMap) -> Response {
@@ -261,7 +302,10 @@ async fn set_status(RouteState(state): RouteState<BridgeState>, RoutePath(id): R
     if status.task_id != id || !["opened", "uploading", "filling", "prepared", "failed"].contains(&status.status.as_str()) {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    if !state.tasks.lock().is_ok_and(|tasks| tasks.contains_key(&id)) { return StatusCode::NOT_FOUND.into_response(); }
+    let Ok(mut tasks) = state.tasks.lock() else { return StatusCode::INTERNAL_SERVER_ERROR.into_response(); };
+    let Some(task) = tasks.get_mut(&id) else { return StatusCode::NOT_FOUND.into_response(); };
+    task.status = status.status.clone();
+    drop(tasks);
     status.message = status.message.chars().take(500).collect();
     let _ = state.app.emit("browser-task-status", status);
     StatusCode::NO_CONTENT.into_response()
@@ -273,16 +317,27 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .setup(|app| {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+            let listener = std::net::TcpListener::bind("127.0.0.1:47653")
+                .or_else(|_| std::net::TcpListener::bind("127.0.0.1:0"))?;
             listener.set_nonblocking(true)?;
+            let data_dir = app.path().app_data_dir()?;
+            fs::create_dir_all(&data_dir)?;
+            let secret_file = data_dir.join("browser-bridge-token");
+            let secret = fs::read_to_string(&secret_file).ok()
+                .filter(|value| value.len() == 64 && value.chars().all(|ch| ch.is_ascii_hexdigit()))
+                .map(Ok).unwrap_or_else(|| {
+                    let value = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+                    fs::write(&secret_file, &value).map(|_| value)
+                })?;
             let state = BridgeState {
                 port: listener.local_addr()?.port(),
-                secret: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
+                secret,
                 tasks: Arc::new(Mutex::new(HashMap::new())),
                 app: app.handle().clone(),
             };
             let router = Router::new()
                 .route("/connect", get(connect_page))
+                .route("/api/tasks", get(list_tasks))
                 .route("/api/tasks/{id}", get(get_task))
                 .route("/api/tasks/{id}/media/{kind}", get(get_media))
                 .route("/api/tasks/{id}/status", post(set_status))

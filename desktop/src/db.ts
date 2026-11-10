@@ -82,7 +82,7 @@ export async function getOrCreateWork(repoRoot: string, sha256: string, bytes: n
   const existing = (await transaction.store.getAll()).find(item => item.sha256 === sha256)
   const now = new Date().toISOString()
   const work: WorkRecord = existing
-    ? { ...existing, filePath, updatedAt: now }
+    ? { ...existing, filePath, content, updatedAt: now }
     : { id, repoRoot, sha256, bytes, filePath, content, createdAt: now, updatedAt: now, publications: [] }
   await transaction.store.put(work)
   await transaction.done

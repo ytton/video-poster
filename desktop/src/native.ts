@@ -6,6 +6,7 @@ export const inDesktop = isTauri()
 export interface BridgeInfo {
   extensionPath: string
   port: number
+  pairUrl: string
 }
 
 export interface BrowserTaskInput {
@@ -17,6 +18,7 @@ export interface BrowserTaskInput {
   declaration: string
   thumbnailPortrait: string
   thumbnailLandscape: string
+  initialStatus?: string
 }
 
 export interface BrowserTaskStatus {

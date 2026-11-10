@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
   "name": "视频发布台",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "在自己的浏览器中填写抖音发布页，发布按钮由用户确认。",
-  "permissions": ["tabs", "storage"],
+  "permissions": ["tabs", "storage", "scripting"],
   "host_permissions": ["http://127.0.0.1/*", "https://creator.douyin.com/*"],
   "background": { "service_worker": "background.js" },
+  "action": { "default_title": "视频发布台", "default_popup": "popup.html" },
   "content_scripts": [
     { "matches": ["http://127.0.0.1/*"], "js": ["connect.js"], "run_at": "document_start" },
     { "matches": ["https://creator.douyin.com/*"], "js": ["douyin.js"], "run_at": "document_idle" }

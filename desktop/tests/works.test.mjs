@@ -29,7 +29,7 @@ test("version 1 records survive the works database upgrade", async () => {
   const first = await getOrCreateWork("repo", "sha", 123, "first.mp4", content)
   const second = await getOrCreateWork("repo", "sha", 123, "moved.mp4", { ...content, title: "第二版标题" })
   assert.equal(first.id, second.id)
-  assert.equal(second.content.title, "第一版标题")
+  assert.equal(second.content.title, "第二版标题")
   assert.equal(second.filePath, "moved.mp4")
   const publication = { taskId: "published-task", platform: "douyin", accountName: "主账号", publishedAt: "2026-11-07T00:00:00Z", values: { title: "平台标题", desc: "平台简介" } }
   await addWorkPublication(first.id, publication)

@@ -38,6 +38,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [storageError, setStorageError] = useState("")
   const [operationError, setOperationError] = useState("")
   const taskRef = useRef<TaskRecord[]>([])
+  const firstLoadRef = useRef(true)
 
   const updateTask = useCallback((id: string, patch: Partial<TaskRecord>) => {
     const next = taskRef.current.map(task => task.id === id ? { ...task, ...patch } : task)
@@ -54,10 +55,31 @@ export function AppProvider({ children }: { children: ReactNode }) {
         inDesktop ? bridgeInfo() : Promise.resolve(null), loadAllTasks(), loadAllWorks(),
       ])
       setBridge(nextBridge)
-      const restored = storedTasks.map(task => task.status === "running" || task.status === "queued"
-        ? { ...task, status: "interrupted" as const, finishedAt: new Date().toISOString(), message: "桌面程序已重启，请到平台核对状态" }
+      const restored = storedTasks.map(task => firstLoadRef.current && task.status === "running"
+        ? { ...task, status: "interrupted" as const, finishedAt: new Date().toISOString(), message: "桌面程序已重启，可在原发布页用扩展继续" }
         : task)
+      if (nextBridge) {
+        for (const task of restored) {
+          if (task.repoRoot !== LOCAL_ROOT || !task.publishValues || ["success", "cancelled"].includes(task.status)) continue
+          const values = task.publishValues
+          try {
+            await createBrowserTask({
+              id: task.id, filePath: String(values.file || ""), title: String(values.title || ""),
+              description: String(values.desc || ""),
+              tags: String(values.tags || "").split(/[,，]/).filter(Boolean),
+              declaration: String(values.declaration || ""),
+              thumbnailPortrait: String(values.thumbnail_portrait || ""),
+              thumbnailLandscape: String(values.thumbnail_landscape || ""),
+              initialStatus: task.status === "interrupted" ? "failed" : task.status,
+            })
+          } catch (error) {
+            task.status = "interrupted"
+            task.message = `原文件不可用，无法在扩展中继续：${String(error)}`
+          }
+        }
+      }
       taskRef.current = restored
+      firstLoadRef.current = false
       setTasks(restored)
       setWorks(storedWorks)
       await Promise.all(restored.filter(task => task.status === "interrupted").map(saveTask))
@@ -119,12 +141,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
     await saveTask(task)
     try {
       const url = await createBrowserTask({ id, ...input })
-      await openUrl(url)
-      window.setTimeout(() => {
-        if (taskRef.current.find(item => item.id === id)?.status === "queued") {
-          updateTask(id, { status: "interrupted", message: "浏览器扩展尚未连接。请确认已在默认浏览器安装扩展，然后重新发起。" })
-        }
-      }, 30000)
+      try {
+        await openUrl(url)
+        updateTask(id, { message: "作品已准备好，请在抖音页面点击扩展图标自动补齐" })
+      } catch (error) {
+        updateTask(id, { message: `作品已准备好，请手动打开抖音创作者中心：${String(error)}` })
+      }
       return id
     } catch (error) {
       updateTask(id, { status: "failed", finishedAt: new Date().toISOString(), message: String(error) })
@@ -141,11 +163,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
     })
     setWorks(previous => [work, ...previous.filter(item => item.id !== work.id)])
     updateTask(id, { status: "success", finishedAt: publishedAt, message: "已由用户确认在抖音发布" })
+    await cancelBrowserTask(id)
   }
 
   const cancelTask = async (id: string): Promise<void> => {
     const task = taskRef.current.find(item => item.id === id)
-    if (!task || !["queued", "running", "interrupted"].includes(task.status)) return
+    if (!task || !["queued", "running", "failed", "interrupted"].includes(task.status)) return
     await cancelBrowserTask(id)
     updateTask(id, { status: "cancelled", finishedAt: new Date().toISOString(), message: "已停止向浏览器提供本机文件；浏览器中已开始的上传需手动停止" })
   }
