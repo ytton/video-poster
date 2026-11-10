@@ -19,11 +19,12 @@ async function render() {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
     const onDouyin = tab?.url?.startsWith("https://creator.douyin.com/")
     let canFill = false
+    let page = null
     context.textContent = onDouyin ? "当前抖音标签页可直接补齐资料" : "先切到抖音创作者页面，再选择作品"
     if (onDouyin) {
       try {
         const result = await send({ type: "inspect", tabId: tab.id })
-        const page = result.page
+        page = result.page
         canFill = page.uploadPage
         context.textContent = page.uploadPage
           ? `当前页面：${page.video ? "视频已上传" : "视频待上传"} · ${page.title ? "标题已有" : "标题待填"} · ${page.description ? "简介已有" : "简介待填"}`
@@ -33,7 +34,7 @@ async function render() {
       }
     }
     openUpload.hidden = canFill
-    openUpload.onclick = () => void send({ type: "open-upload", tabId: onDouyin ? tab.id : undefined })
+    openUpload.onclick = () => void send({ type: "open-upload" })
       .then(() => window.close()).catch(error => { message.textContent = error.message })
     const result = await send({ type: "list" })
     const { activeTaskId } = await chrome.storage.local.get("activeTaskId")
@@ -49,14 +50,15 @@ async function render() {
       info.append(title, status)
       const button = document.createElement("button")
       if (task.id === activeTaskId) row.style.borderColor = "#17657b"
-      button.textContent = task.status === "failed" ? "继续填写" : "自动补齐"
+      const resume = task.status !== "queued" || !!(page?.video || page?.title || page?.description || page?.cover || page?.declaration)
+      button.textContent = resume ? "补齐剩余内容" : "自动填写"
       button.className = "primary"
       button.disabled = !canFill
       button.onclick = async () => {
         button.disabled = true
         message.textContent = "正在检查当前页面…"
         try {
-          await send({ type: "start", tabId: tab.id, taskId: task.id })
+          await send({ type: "start", tabId: tab.id, taskId: task.id, resume })
           window.close()
         } catch (error) {
           message.textContent = error.message

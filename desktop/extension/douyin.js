@@ -1,6 +1,8 @@
 (() => {
-  if (globalThis.__videoPosterContentReady) return
-  globalThis.__videoPosterContentReady = true
+  const scriptVersion = 3
+  const previousScript = globalThis.__videoPosterContentReady
+  if (previousScript?.version === scriptVersion) return
+  previousScript?.dispose?.()
   let active = false
 
   function send(message) {
@@ -20,7 +22,7 @@
     host.id = "video-poster-status"
     host.style.cssText = "position:fixed;right:20px;bottom:20px;z-index:2147483647"
     const shadow = host.attachShadow({ mode: "open" })
-    shadow.innerHTML = `<style>div{width:280px;box-sizing:border-box;padding:13px 14px;border:1px solid #d5dce0;border-radius:6px;background:#fff;box-shadow:0 8px 30px #0002;color:#283438;font:13px/1.5 system-ui}strong{display:block;margin-bottom:4px}p{margin:0;white-space:pre-wrap}button{margin-top:8px;border:1px solid #ccd4d7;border-radius:4px;background:#fff;padding:5px 10px;cursor:pointer}</style><div><strong>视频发布台</strong><p></p><button hidden>继续填写</button></div>`
+    shadow.innerHTML = `<style>div{width:280px;box-sizing:border-box;padding:13px 14px;border:1px solid #d5dce0;border-radius:6px;background:#fff;box-shadow:0 8px 30px #0002;color:#283438;font:13px/1.5 system-ui}strong{display:block;margin-bottom:4px}p{margin:0;white-space:pre-wrap}button{margin-top:8px;border:1px solid #ccd4d7;border-radius:4px;background:#fff;padding:5px 10px;cursor:pointer}</style><div><strong>视频发布台</strong><p></p><button hidden>补齐剩余内容</button></div>`
     document.documentElement.append(host)
     return shadow
   }
@@ -35,8 +37,8 @@
 
   async function retryHere() {
     try {
-      const result = await send({ type: "retry" })
-      await fill(result.job)
+      const result = await send({ type: "resume" })
+      await fill(result.job, true)
     } catch (error) {
       show(String(error.message || error), true)
     }
@@ -87,6 +89,7 @@
 
   function hasVideo() {
     if (titleInput()) return true
+    if (document.querySelector('div.zone-container[contenteditable="true"]')) return true
     if (document.querySelector('input.upload-btn-input')?.files?.length) return true
     if (document.querySelector('video[src]')) return true
     const uploadArea = [...document.querySelectorAll('[class*="long-card"], div.progress-div')]
@@ -94,8 +97,9 @@
     return /重新上传|上传中|上传成功|上传完成|处理中|检测中|\d+%/.test(uploadArea)
   }
 
-  async function ensureVideo(job, payload) {
+  async function ensureVideo(job, payload, resume) {
     if (hasVideo()) return
+    if (resume) throw new Error("当前页面未识别到已上传的视频或填写表单，请在页面确认。补齐剩余内容不会重新上传视频")
     if (!location.pathname.endsWith("/upload")) {
       throw new Error("当前页面不是抖音视频上传页。请切到上传页，或在这里手动上传视频后再点扩展。")
     }
@@ -159,6 +163,21 @@
     return null
   }
 
+  function declarationChoiceMatches(text, value) {
+    const normalized = text.replace(/[\s：:，,。.!！?？（）()]/g, "").toLowerCase()
+    if (!value) return /无需|不添加|不声明|无声明/.test(normalized)
+    if (value === "内容由AI生成") return /ai|人工智能/i.test(normalized) && /生成|创作|制作/.test(normalized)
+    if (value === "内容为转载信息") return /转载|搬运|转发/.test(normalized)
+    return /个人观点|个人见解|主观观点/.test(normalized)
+  }
+
+  function declarationOption(dialog, value) {
+    const candidates = [...dialog.querySelectorAll('label,[role="radio"],.semi-radio,button,span,div')]
+      .filter(element => visible(element) && declarationChoiceMatches(element.textContent.trim(), value))
+      .sort((a, b) => a.textContent.length - b.textContent.length)
+    return candidates.find(element => element.textContent.trim().length < 80)
+  }
+
   async function setDeclaration(value) {
     let dialog = declarationDialog()
     if (!dialog && !value) return
@@ -172,12 +191,12 @@
     }
     if (!dialog) return
     const choice = value || "无需添加自主声明"
-    const option = [...dialog.querySelectorAll('label,[role="radio"]')]
-      .find(element => visible(element) && element.textContent.trim().includes(choice)) || exactText(choice, dialog)
-    if (!option) throw new Error(`当前声明弹窗中没有“${choice}”选项`)
-    const selected = option.matches('[aria-checked="true"],.semi-radio-checked')
-      || !!option.querySelector('input[type="radio"]:checked,[aria-checked="true"],.semi-radio-checked')
-    if (!selected) option.click()
+    const option = declarationOption(dialog, value)
+    if (!option) throw new Error(`当前声明弹窗中没有找到“${choice}”选项，请手动设置后再补齐剩余内容`)
+    const control = option.closest('label,[role="radio"],.semi-radio') || option
+    const selected = control.matches('[aria-checked="true"],.semi-radio-checked')
+      || !!control.querySelector('input[type="radio"]:checked,[aria-checked="true"],.semi-radio-checked')
+    if (!selected) control.click()
     const confirm = await waitUntil(() => [...dialog.querySelectorAll("button")]
       .find(button => visible(button) && button.textContent.trim() === "确定" && !button.disabled),
     10000, "作品声明还不能确认，请检查弹窗")
@@ -207,13 +226,17 @@
     }
     for (const [label, asset] of [["设置竖封面", payload.portrait], ["设置横封面", payload.landscape]]) {
       if (!asset) continue
-      exactText(label, dialog)?.click()
+      const tab = exactText(label, dialog)
+      if (!tab) throw new Error(`找不到${label}的选项，请在抖音页面核对`)
+      tab.click()
       await sleep(400)
-      const area = dialog.querySelector('.semi-upload:has(.semi-upload-drag-area-main-text)')
-      if (area?.querySelector("img[src]")) continue
-      const input = area?.querySelector("input.semi-upload-hidden-input")
-        || [...dialog.querySelectorAll("input.semi-upload-hidden-input")].at(-1)
-      if (!input) throw new Error(`找不到${label}的图片上传框`)
+      const area = [...dialog.querySelectorAll('.semi-upload:has(.semi-upload-drag-area-main-text)')].find(visible)
+      if (!area) {
+        if ([...dialog.querySelectorAll('.semi-upload img[src]')].some(visible)) continue
+        throw new Error(`无法判断${label}是否已设置，请在抖音页面核对，扩展不会覆盖现有封面`)
+      }
+      const input = area.querySelector("input.semi-upload-hidden-input")
+      if (!input) throw new Error(`找不到${label}的图片上传框，请在抖音页面核对`)
       setFile(input, await fileFromBridge(job, asset))
       await sleep(1200)
     }
@@ -247,7 +270,7 @@
     throw new Error("尚未确认抖音视频上传完成，请在页面中核对上传进度")
   }
 
-  async function fill(job) {
+  async function fill(job, resume = false) {
     if (active) return
     active = true
     try {
@@ -255,7 +278,8 @@
       if (!response.ok) throw new Error(`无法获取作品（HTTP ${response.status}）`)
       const payload = await response.json()
       if (payload.id !== job.task) throw new Error("作品任务不匹配")
-      await ensureVideo(job, payload)
+      if (!inspectPage().uploadPage) throw new Error("当前不是抖音视频上传表单，请切回已有上传页面")
+      await ensureVideo(job, payload, resume)
       await status("filling", "正在检查并补齐标题、简介、标签、声明和封面")
       if (declarationDialog()) await setDeclaration(payload.declaration)
       await fillText(payload)
@@ -273,7 +297,7 @@
 
   async function runCurrentJob() {
     const result = await send({ type: "job" })
-    await fill(result.job)
+    await fill(result.job, result.job.resume || result.job.stage !== "opened")
   }
 
   function inspectPage() {
@@ -287,29 +311,37 @@
     }
   }
 
-  chrome.runtime.onMessage.addListener((message, _sender, respond) => {
+  const onMessage = (message, _sender, respond) => {
     if (message?.type === "inspect-page") { respond({ ok: true, page: inspectPage() }); return }
     if (message?.type !== "start") return
     void runCurrentJob().catch(error => show(String(error.message || error), true))
     respond({ ok: true })
-  })
+  }
+  chrome.runtime.onMessage.addListener(onMessage)
 
   async function init() {
     const result = await send({ type: "job" }).catch(() => null)
     if (!result?.job) return
     if (result.job.stage === "prepared") { show("资料已补齐，请核对并亲自点击发布"); return }
-    if (result.job.stage === "failed") { show("上次填写未完成，可以在当前页面继续", true); return }
+    if (result.job.stage === "failed") { show("当前页面仍可继续，点击后只补齐缺少的内容", true); return }
     if (["opened", "uploading", "filling"].includes(result.job.stage)) {
-      if (/\/content\/(upload|publish|post\/video)/.test(location.pathname)) void fill(result.job)
+      if (inspectPage().uploadPage) void fill(result.job, result.job.resume || result.job.stage !== "opened")
       else show("请切到抖音视频上传页后点击扩展图标继续")
     }
   }
 
   void init()
   let previousPath = location.pathname
-  window.setInterval(() => {
+  const pathObserver = window.setInterval(() => {
     if (location.pathname === previousPath) return
     previousPath = location.pathname
     if (!active) void init()
   }, 1000)
+  globalThis.__videoPosterContentReady = {
+    version: scriptVersion,
+    dispose() {
+      chrome.runtime.onMessage.removeListener(onMessage)
+      window.clearInterval(pathObserver)
+    },
+  }
 })()

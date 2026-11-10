@@ -24,7 +24,7 @@ async function reportStatus(job, status, message) {
   })
 }
 
-async function startInTab(tabId, taskId) {
+async function startInTab(tabId, taskId, resume) {
   const bridge = await bridgeConnection()
   const tab = await chrome.tabs.get(tabId)
   if (!tab.url?.startsWith("https://creator.douyin.com/")) {
@@ -34,27 +34,20 @@ async function startInTab(tabId, taskId) {
   const payload = await response.json()
   if (payload.id !== taskId) throw new Error("作品任务无效")
   const previous = (await chrome.storage.session.get(`job:${tabId}`))[`job:${tabId}`]
-  const job = { ...bridge, task: taskId, stage: "opened", completed: previous?.task === taskId ? previous.completed || [] : [] }
+  const job = { ...bridge, task: taskId, stage: "opened", resume: !!resume || previous?.task === taskId,
+    completed: previous?.task === taskId ? previous.completed || [] : [] }
   await chrome.storage.session.set({ [`job:${tabId}`]: job })
   await reportStatus(job, "opened", "已在当前抖音标签页开始检查现有内容")
-  try {
-    await chrome.tabs.sendMessage(tabId, { type: "start" })
-  } catch {
-    await chrome.scripting.executeScript({ target: { tabId }, files: ["douyin.js"] })
-    await chrome.tabs.sendMessage(tabId, { type: "start" })
-  }
+  await chrome.scripting.executeScript({ target: { tabId }, files: ["douyin.js"] })
+  await chrome.tabs.sendMessage(tabId, { type: "start" })
   return { ok: true }
 }
 
 async function inspectTab(tabId) {
   const tab = await chrome.tabs.get(tabId)
   if (!tab.url?.startsWith("https://creator.douyin.com/")) throw new Error("当前不是抖音创作者页面")
-  try {
-    return await chrome.tabs.sendMessage(tabId, { type: "inspect-page" })
-  } catch {
-    await chrome.scripting.executeScript({ target: { tabId }, files: ["douyin.js"] })
-    return chrome.tabs.sendMessage(tabId, { type: "inspect-page" })
-  }
+  await chrome.scripting.executeScript({ target: { tabId }, files: ["douyin.js"] })
+  return chrome.tabs.sendMessage(tabId, { type: "inspect-page" })
 }
 
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
@@ -92,7 +85,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     }
     if (message?.type === "start") {
       if (sender.tab) throw new Error("请从扩展弹窗选择作品")
-      return startInTab(message.tabId, message.taskId)
+      return startInTab(message.tabId, message.taskId, message.resume)
     }
     if (message?.type === "inspect") {
       if (sender.tab) throw new Error("请从扩展弹窗查看页面")
@@ -100,8 +93,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     }
     if (message?.type === "open-upload") {
       if (sender.tab) throw new Error("请从扩展弹窗打开上传页")
-      if (message.tabId) await chrome.tabs.update(message.tabId, { url: UPLOAD_URL, active: true })
-      else await chrome.tabs.create({ url: UPLOAD_URL })
+      await chrome.tabs.create({ url: UPLOAD_URL })
       return { ok: true }
     }
     if (!sender.tab?.id || !sender.url?.startsWith("https://creator.douyin.com/")) {
@@ -122,9 +114,10 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       await chrome.storage.session.set({ [key]: { ...job, completed: [...new Set([...(job.completed || []), message.step])] } })
       return { ok: true }
     }
-    if (message?.type === "retry") {
-      await chrome.storage.session.set({ [key]: { ...job, stage: "opened" } })
-      return { ok: true, job: { ...job, stage: "opened" } }
+    if (message?.type === "resume") {
+      const resumed = { ...job, stage: "opened", resume: true }
+      await chrome.storage.session.set({ [key]: resumed })
+      return { ok: true, job: resumed }
     }
     throw new Error("未知扩展操作")
   })().then(respond).catch(error => respond({ ok: false, error: String(error.message || error) }))
