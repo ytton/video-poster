@@ -59,6 +59,12 @@ export const CREATOR_PAGES: Record<string, { url: string; label: string }> = {
   "facebook-page": { url: "https://business.facebook.com/latest/posts/published", label: "创作者后台" },
 }
 
+export const UPLOAD_PAGES: Record<string, string> = {
+  douyin: "https://creator.douyin.com/creator-micro/content/upload",
+  baijiahao: "https://baijiahao.baidu.com/builder/rc/edit?type=videoV2",
+  dayu: "https://mp.dayu.com/dashboard/video/write",
+}
+
 export const FIELD_LABELS: Record<string, string> = {
   account: "账号别名", file: "文件", images: "图片", title: "标题", desc: "简介",
   note: "正文", tags: "话题标签", thumbnail: "封面", thumbnail_landscape: "横版封面",

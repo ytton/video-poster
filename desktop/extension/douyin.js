@@ -312,8 +312,36 @@
     }
   }
 
+  function recordLinks() {
+    if (!location.pathname.includes("/content/manage")) throw new Error("请打开抖音作品管理页核对发布记录")
+    return [...document.querySelectorAll('a[href*="/content/manage"],a[href*="/video/"]')]
+      .map(link => {
+        const url = new URL(link.href)
+        const id = url.searchParams.get("id") || url.searchParams.get("item_id") || url.pathname.match(/\/video\/(\d+)/)?.[1]
+        const row = link.closest('tr,[class*="video-item"],[class*="content-item"],[class*="manage-item"]') || link.parentElement
+        return { id, url: url.href, title: link.textContent.trim(), status: row?.textContent || "" }
+      }).filter(item => item.id && item.title)
+  }
+
+  function verifyRecord(payload, baseline) {
+    const matches = recordLinks().filter(item => item.title === payload.title && !baseline.includes(item.id)
+      && /已发布|审核中|待审核|发布成功/.test(item.status) && !/草稿|发布失败|未通过/.test(item.status))
+    if (matches.length !== 1) throw new Error(matches.length ? "抖音有多条同名新作品，无法确定本次发布" : "尚未在抖音作品管理中找到本次已提交作品")
+    return { recordId: matches[0].id, recordUrl: matches[0].url, title: matches[0].title }
+  }
+
   const onMessage = (message, _sender, respond) => {
     if (message?.type === "inspect-page") { respond({ ok: true, page: inspectPage() }); return }
+    if (message?.type === "capture-records") {
+      try { respond({ ok: true, ids: recordLinks().map(item => item.id) }) }
+      catch (error) { respond({ ok: false, error: String(error.message || error) }) }
+      return
+    }
+    if (message?.type === "verify-record") {
+      try { respond({ ok: true, evidence: verifyRecord(message.payload, message.baseline) }) }
+      catch (error) { respond({ ok: false, error: String(error.message || error) }) }
+      return
+    }
     if (message?.type !== "start") return
     void runCurrentJob().catch(error => show(String(error.message || error), true))
     respond({ ok: true })

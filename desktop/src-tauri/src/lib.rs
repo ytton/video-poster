@@ -37,6 +37,7 @@ struct BrowserTask {
 #[serde(rename_all = "camelCase")]
 struct BrowserTaskSummary {
     id: String,
+    platform: String,
     title: String,
     status: String,
     created_at: u128,
@@ -53,6 +54,7 @@ struct BrowserTaskList {
 #[serde(rename_all = "camelCase")]
 struct BrowserPayload {
     id: String,
+    platform: String,
     title: String,
     description: String,
     tags: Vec<String>,
@@ -75,6 +77,7 @@ struct AssetInfo {
 #[serde(rename_all = "camelCase")]
 struct BrowserTaskInput {
     id: String,
+    platform: String,
     file_path: String,
     title: String,
     description: String,
@@ -91,6 +94,15 @@ struct BrowserTaskStatus {
     task_id: String,
     status: String,
     message: String,
+    evidence: Option<PublicationEvidence>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PublicationEvidence {
+    record_id: String,
+    record_url: String,
+    title: String,
 }
 
 #[derive(Serialize)]
@@ -188,6 +200,8 @@ const EXTENSION_FILES: &[(&str, &str)] = &[
     ("background.js", include_str!("../../extension/background.js")),
     ("connect.js", include_str!("../../extension/connect.js")),
     ("douyin.js", include_str!("../../extension/douyin.js")),
+    ("baijiahao.js", include_str!("../../extension/baijiahao.js")),
+    ("dayu.js", include_str!("../../extension/dayu.js")),
     ("popup.html", include_str!("../../extension/popup.html")),
     ("popup.js", include_str!("../../extension/popup.js")),
 ];
@@ -218,7 +232,8 @@ fn bridge_info(app: AppHandle, state: State<'_, BridgeState>) -> Result<BridgeIn
 #[tauri::command]
 fn create_browser_task(state: State<'_, BridgeState>, input: BrowserTaskInput) -> Result<String, String> {
     if Uuid::parse_str(&input.id).is_err() { return Err("任务编号无效".into()); }
-    if input.title.trim().is_empty() || input.title.chars().count() > 30 { return Err("抖音标题需为 1 到 30 字".into()); }
+    if !["douyin", "baijiahao", "dayu"].contains(&input.platform.as_str()) { return Err("该平台尚未接入浏览器扩展".into()); }
+    if input.title.trim().is_empty() || input.title.chars().count() > 30 { return Err("标题需为 1 到 30 字".into()); }
     if input.description.chars().count() > 2000 { return Err("简介过长，请缩短后重试".into()); }
     if !["", "内容为转载信息", "内容由AI生成", "内容为个人观点或见解"].contains(&input.declaration.as_str()) {
         return Err("抖音声明类型无效".into());
@@ -228,7 +243,7 @@ fn create_browser_task(state: State<'_, BridgeState>, input: BrowserTaskInput) -
     let landscape = if input.thumbnail_landscape.is_empty() { None } else { Some(validated_file(&input.thumbnail_landscape, &["jpg", "jpeg", "png"])?) };
     let base = format!("http://127.0.0.1:{}/api/tasks/{}/media", state.port, input.id);
     let payload = BrowserPayload {
-        id: input.id.clone(), title: input.title.trim().into(), description: input.description,
+        id: input.id.clone(), platform: input.platform.clone(), title: input.title.trim().into(), description: input.description,
         tags: input.tags.into_iter().map(|value| value.trim().trim_start_matches('#').to_string()).filter(|value| !value.is_empty()).take(20).collect(),
         declaration: input.declaration,
         video: asset(&video, format!("{base}/video"))?,
@@ -236,13 +251,12 @@ fn create_browser_task(state: State<'_, BridgeState>, input: BrowserTaskInput) -
         landscape: landscape.as_ref().map(|path| asset(path, format!("{base}/landscape"))).transpose()?,
     };
     let mut tasks = state.tasks.lock().map_err(|_| "任务状态不可用")?;
-    if !tasks.contains_key(&input.id) {
-        let created_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-            .map_err(|error| error.to_string())?.as_millis();
-        let status = input.initial_status.filter(|value| ["queued", "opened", "uploading", "filling", "failed", "prepared"].contains(&value.as_str()))
-            .unwrap_or_else(|| "queued".into());
-        tasks.insert(input.id.clone(), BrowserTask { payload, video, portrait, landscape, status, created_at });
-    }
+    let created_at = tasks.get(&input.id).map(|task| task.created_at).unwrap_or_else(||
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+    let status = tasks.get(&input.id).map(|task| task.status.clone()).or_else(|| input.initial_status.filter(|value|
+        ["queued", "opened", "uploading", "filling", "failed", "prepared"].contains(&value.as_str())))
+        .unwrap_or_else(|| "queued".into());
+    tasks.insert(input.id.clone(), BrowserTask { payload, video, portrait, landscape, status, created_at });
     Ok(format!("http://127.0.0.1:{}/connect#task={}&token={}", state.port, input.id, state.secret))
 }
 
@@ -250,7 +264,7 @@ async fn list_tasks(RouteState(state): RouteState<BridgeState>, headers: HeaderM
     if !authorized(&headers, &state) { return StatusCode::UNAUTHORIZED.into_response(); }
     let Ok(tasks) = state.tasks.lock() else { return StatusCode::INTERNAL_SERVER_ERROR.into_response(); };
     let mut result: Vec<_> = tasks.values().map(|task| BrowserTaskSummary {
-        id: task.payload.id.clone(), title: task.payload.title.clone(),
+        id: task.payload.id.clone(), platform: task.payload.platform.clone(), title: task.payload.title.clone(),
         status: task.status.clone(), created_at: task.created_at,
     }).collect();
     result.sort_by(|a, b| b.created_at.cmp(&a.created_at));
@@ -293,7 +307,7 @@ async fn cors(request: Request<Body>, next: Next) -> Response {
 }
 
 async fn connect_page() -> Html<&'static str> {
-    Html("<!doctype html><html lang=zh-CN><meta charset=utf-8><title>连接视频发布台</title><style>body{font:15px system-ui;margin:15vh auto;max-width:560px;color:#253238}h1{font-size:22px}p{line-height:1.7}</style><h1>正在连接视频发布台扩展</h1><p>如未出现连接成功提示，请确认已在当前 Chrome 或 Edge 中加载视频发布台扩展。</p><p>连接后可关闭此页，在抖音发布页点击扩展图标选择作品。最终发布由你在平台页面确认。</p></html>")
+    Html("<!doctype html><html lang=zh-CN><meta charset=utf-8><title>连接视频发布台</title><style>body{font:15px system-ui;margin:15vh auto;max-width:560px;color:#253238}h1{font-size:22px}p{line-height:1.7}</style><h1>正在连接视频发布台扩展</h1><p>如未出现连接成功提示，请确认已在当前 Chrome 或 Edge 中加载视频发布台扩展。</p><p>连接后可关闭此页，在对应平台发布页点击扩展图标选择作品。最终发布由你在平台页面确认。</p></html>")
 }
 
 async fn get_task(RouteState(state): RouteState<BridgeState>, RoutePath(id): RoutePath<String>, headers: HeaderMap) -> Response {
@@ -321,12 +335,24 @@ async fn get_media(RouteState(state): RouteState<BridgeState>, RoutePath((id, ki
 
 async fn set_status(RouteState(state): RouteState<BridgeState>, RoutePath(id): RoutePath<String>, headers: HeaderMap, Json(mut status): Json<BrowserTaskStatus>) -> Response {
     if !authorized(&headers, &state) { return StatusCode::UNAUTHORIZED.into_response(); }
-    if status.task_id != id || !["opened", "uploading", "filling", "prepared", "failed"].contains(&status.status.as_str()) {
+    if status.task_id != id || !["opened", "uploading", "filling", "prepared", "verified", "check-failed", "failed"].contains(&status.status.as_str()) {
         return StatusCode::BAD_REQUEST.into_response();
     }
     let Ok(mut tasks) = state.tasks.lock() else { return StatusCode::INTERNAL_SERVER_ERROR.into_response(); };
     let Some(task) = tasks.get_mut(&id) else { return StatusCode::NOT_FOUND.into_response(); };
-    task.status = status.status.clone();
+    if status.status == "verified" {
+        let Some(evidence) = &status.evidence else { return StatusCode::BAD_REQUEST.into_response(); };
+        let valid_url = match task.payload.platform.as_str() {
+            "douyin" => evidence.record_url.starts_with("https://creator.douyin.com/") || evidence.record_url.starts_with("https://www.douyin.com/"),
+            "baijiahao" => evidence.record_url.starts_with("https://baijiahao.baidu.com/"),
+            "dayu" => evidence.record_url.starts_with("https://mp.dayu.com/") || evidence.record_url.starts_with("https://mparticle.uc.cn/"),
+            _ => false,
+        };
+        if evidence.title != task.payload.title || evidence.record_id.trim().is_empty() || !valid_url {
+            return StatusCode::BAD_REQUEST.into_response();
+        }
+    }
+    if status.status != "check-failed" { task.status = status.status.clone(); }
     drop(tasks);
     status.message = status.message.chars().take(500).collect();
     let _ = state.app.emit("browser-task-status", status);

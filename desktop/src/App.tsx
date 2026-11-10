@@ -12,7 +12,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { AppProvider, useApp } from "./state"
 import { inDesktop, prepareCoverPreview, prepareVideoPreview } from "./native"
-import { CREATOR_PAGES, platformLabel, PLATFORM_COLORS } from "./platforms"
+import { CREATOR_PAGES, platformLabel, PLATFORM_COLORS, UPLOAD_PAGES } from "./platforms"
 import { VideoDropzone } from "./components/VideoDropzone"
 import { CoverDropzone } from "./components/CoverDropzone"
 import { VideoFramePicker } from "./components/VideoFramePicker"
@@ -39,12 +39,12 @@ function PlatformMark({ platform }: { platform: string }) {
 
 function StatusTag({ status }: { status: string }) {
   const labels: Record<string, string> = {
-    queued: "等待扩展", running: "填写中", prepared: "待人工发布", success: "已确认发布",
+    queued: "等待扩展", running: "进行中", prepared: "待平台发布", verified: "已检验", success: "已发布",
     failed: "失败", interrupted: "需核对", cancelled: "已停止",
   }
   const styles: Record<string, string> = {
     queued: "border-gray-200 bg-gray-50 text-gray-700", running: "border-sky-200 bg-sky-50 text-sky-800",
-    prepared: "border-amber-200 bg-amber-50 text-amber-800", success: "border-emerald-200 bg-emerald-50 text-emerald-800",
+    prepared: "border-amber-200 bg-amber-50 text-amber-800", verified: "border-emerald-200 bg-emerald-50 text-emerald-800", success: "border-emerald-200 bg-emerald-50 text-emerald-800",
     failed: "border-red-200 bg-red-50 text-red-800", interrupted: "border-amber-200 bg-amber-50 text-amber-800",
   }
   return <Badge variant="outline" className={`font-normal ${styles[status] || "border-gray-200 text-gray-700"}`}>{labels[status] || status}</Badge>
@@ -80,7 +80,7 @@ function Empty({ icon: Icon, title, detail }: { icon: typeof Send; title: string
 function PublishPage({ onPublished, initialWork, selectedPlatforms, openPlatforms }: {
   onPublished: (id: string) => void; initialWork?: WorkRecord; selectedPlatforms: string[]; openPlatforms: () => void
 }) {
-  const { bridge, tasks, prepareWork, createTask, activateWork, confirmPublished, confirmManualPublished, setOperationError } = useApp()
+  const { tasks, prepareWork, createTask, resumeTask, refreshTask, startManualPlatform, activateWork, verifyPublished, setOperationError } = useApp()
   const [file, setFile] = useState("")
   const [title, setTitle] = useState(initialWork?.content.title || "")
   const [description, setDescription] = useState(initialWork?.content.description || "")
@@ -95,7 +95,7 @@ function PublishPage({ onPublished, initialWork, selectedPlatforms, openPlatform
   const [submitting, setSubmitting] = useState(false)
   const [confirmingPlatform, setConfirmingPlatform] = useState("")
   const completed = new Set(initialWork?.publications.map(item => item.platform) || [])
-  const douyinTask = tasks.find(task => task.workId === initialWork?.id && task.platform === "douyin" && task.status !== "cancelled")
+  const platformTask = (platform: string) => tasks.find(task => task.workId === initialWork?.id && task.platform === platform && !["cancelled", "success"].includes(task.status))
 
   useEffect(() => {
     if (!initialWork) return
@@ -123,12 +123,15 @@ function PublishPage({ onPublished, initialWork, selectedPlatforms, openPlatform
     setFramePickerOpen(true)
   }
   const declaration = origin === "reprint" ? "内容为转载信息" : mark === "ai" ? "内容由AI生成" : mark === "opinion" ? "内容为个人观点或见解" : ""
-  const submit = async () => {
+  const saveCurrentWork = async () => {
     setFormError("")
-    if (!file || !title.trim()) { setFormError("请选择视频并填写标题"); return }
-    if (!selectedPlatforms.length) { setFormError("请先到平台页选择发布平台"); return }
-    if (selectedPlatforms.includes("douyin") && title.trim().length > 30) { setFormError("抖音标题最多 30 字"); return }
-    if (selectedPlatforms.includes("douyin") && origin === "reprint" && mark !== "none") { setFormError("转载与其他内容声明不能同时设置"); return }
+    if (!file || !title.trim()) { setFormError("请选择视频并填写标题"); return null }
+    if (!selectedPlatforms.length) { setFormError("请先到平台页选择发布平台"); return null }
+    if (selectedPlatforms.includes("douyin") && title.trim().length > 30) { setFormError("抖音标题最多 30 字"); return null }
+    if (selectedPlatforms.includes("baijiahao") && title.trim().length < 9) { setFormError("百家号视频标题至少 9 字"); return null }
+    if (selectedPlatforms.includes("dayu") && title.trim().length < 5) { setFormError("大鱼号视频标题至少 5 字"); return null }
+    if (selectedPlatforms.includes("dayu") && description.length > 200) { setFormError("大鱼号视频简介最多 200 字"); return null }
+    if (selectedPlatforms.includes("douyin") && origin === "reprint" && mark !== "none") { setFormError("转载与其他内容声明不能同时设置"); return null }
     setSubmitting(true)
     try {
       const normalizedTags = tags.split(/[,，]/).map(tag => tag.trim().replace(/^#/, "")).filter(Boolean)
@@ -136,38 +139,49 @@ function PublishPage({ onPublished, initialWork, selectedPlatforms, openPlatform
         title: title.trim(), description, tags: normalizedTags.join(","), platforms: selectedPlatforms, thumbnailLandscape,
         thumbnailPortrait, origin, mark, schedule: "",
       }, initialWork?.sha256)
-      if (selectedPlatforms.includes("douyin")) {
-        await createTask(work, {
-          filePath: file, title: title.trim(), description, tags: normalizedTags, declaration,
-          thumbnailPortrait, thumbnailLandscape,
-        })
-      } else await activateWork(work, false)
-      for (const platform of selectedPlatforms.filter(item => item !== "douyin")) {
-        try { await openUrl(CREATOR_PAGES[platform].url) }
-        catch (error) { setOperationError(`无法打开${platformLabel(platform)}后台：${String(error)}`) }
-      }
+      await activateWork(work, false)
       onPublished(work.id)
+      return work
     } catch (error) {
       setFormError(String(error))
+      return null
     } finally { setSubmitting(false) }
   }
 
-  const confirmPlatform = async (platform: string) => {
-    if (!initialWork || !window.confirm(`确认已在${platformLabel(platform)}后台看到这部作品发布成功？`)) return
+  const startPlatform = async (platform: string) => {
     setConfirmingPlatform(platform)
     try {
-      if (platform === "douyin") {
-        if (!douyinTask) throw new Error("找不到抖音待确认任务")
-        await confirmPublished(douyinTask.id)
-      } else await confirmManualPublished(initialWork.id, platform)
-    } catch (error) { setOperationError(String(error)) }
+      const work = await saveCurrentWork()
+      if (!work) return
+      if (!UPLOAD_PAGES[platform]) {
+        await startManualPlatform(work, platform)
+        return
+      }
+      const pending = tasks.find(task => task.workId === work.id && task.platform === platform && !["cancelled", "success"].includes(task.status))
+      const input = {
+        platform, filePath: file, title: title.trim(), description,
+        tags: tags.split(/[,，]/).map(tag => tag.trim().replace(/^#/, "")).filter(Boolean),
+        declaration, thumbnailPortrait, thumbnailLandscape,
+      }
+      if (pending) { await refreshTask(pending.id, input); await resumeTask(pending.id) }
+      else await createTask(work, input)
+    } catch (error) { setOperationError(`无法打开${platformLabel(platform)}发布页：${String(error)}`) }
+    finally { setConfirmingPlatform("") }
+  }
+
+  const verifyPlatform = async (platform: string) => {
+    const task = platformTask(platform)
+    if (!task) return
+    setConfirmingPlatform(platform)
+    try { await verifyPublished(task.id) }
+    catch (error) { setOperationError(String(error)) }
     finally { setConfirmingPlatform("") }
   }
 
   return <div className="flex h-full min-h-0 flex-col">
     <SectionHead title={initialWork ? "编辑作品" : "新建作品"}
-      subtitle="保存作品资料后打开所选平台的创作者中心"
-      right={<Button size="sm" onClick={() => void submit()} disabled={(selectedPlatforms.includes("douyin") && !bridge) || submitting}><Upload />{submitting ? "正在保存" : "发布"}</Button>} />
+      subtitle="保存作品后逐个平台去发布，完成后回来检验记录"
+      right={<Button size="sm" onClick={() => void saveCurrentWork()} disabled={submitting}><Upload />{submitting ? "正在保存" : "保存作品"}</Button>} />
     <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(270px,320px)]">
       <div className="tool-scroll min-h-0 px-5 py-4" tabIndex={0}><div className="space-y-5">
         <section className="space-y-3"><h2 className="text-sm font-semibold">视频与文案</h2>
@@ -192,18 +206,20 @@ function PublishPage({ onPublished, initialWork, selectedPlatforms, openPlatform
           <Button size="sm" variant="ghost" onClick={openPlatforms}>选择平台</Button></div>
           {!selectedPlatforms.length && <p className="text-xs text-muted-foreground">尚未选择发布平台</p>}
           <div className="divide-y divide-border border-y border-border bg-white">{selectedPlatforms.map(platform => {
-            const done = completed.has(platform)
-            const canConfirm = !!initialWork && !done && (platform !== "douyin" || douyinTask?.status === "prepared")
+            const publication = initialWork?.publications.find(item => item.platform === platform)
+            const done = !!publication
+            const task = platformTask(platform)
             return <div key={platform} className="flex min-h-11 items-center gap-2 px-2.5 py-1.5 text-xs">
               <PlatformMark platform={platform} /><span className="min-w-0 flex-1 font-medium">{platformLabel(platform)}</span>
-              <span className={done ? "text-emerald-700" : "text-muted-foreground"}>{done ? "已确认发布" : platform === "douyin" && douyinTask ? douyinTask.status === "prepared" ? "待确认" : "待填写" : "待发布"}</span>
-              {canConfirm && <Button size="sm" variant="ghost" disabled={confirmingPlatform === platform} onClick={() => void confirmPlatform(platform)}><Check />确认</Button>}
-              <Button size="icon-sm" variant="ghost" title={`打开${platformLabel(platform)}${CREATOR_PAGES[platform].label}`} aria-label={`打开${platformLabel(platform)}${CREATOR_PAGES[platform].label}`}
-                onClick={() => void openUrl(CREATOR_PAGES[platform].url).catch(error => setOperationError(String(error)))}><ExternalLink /></Button>
+              <span className={done ? "text-emerald-700" : "text-muted-foreground"}>{done ? "已发布" : task ? !UPLOAD_PAGES[platform] ? "手动发布中" : task.status === "prepared" ? "待用户发布" : task.status === "failed" ? "需补齐" : "进行中" : "未发布"}</span>
+              {!done && <Button size="sm" variant="ghost" disabled={confirmingPlatform === platform || submitting} onClick={() => void startPlatform(platform)}><ExternalLink />{task ? "继续发布" : "去发布"}</Button>}
+              {!done && task && !!UPLOAD_PAGES[platform] && <Button size="sm" variant="outline" disabled={confirmingPlatform === platform} onClick={() => void verifyPlatform(platform)}><Check />检验已发布</Button>}
+              {publication?.evidence?.recordUrl && <Button size="icon-sm" variant="ghost" title="打开平台作品记录" aria-label="打开平台作品记录"
+                onClick={() => void openUrl(publication.evidence!.recordUrl).catch(error => setOperationError(String(error)))}><ExternalLink /></Button>}
             </div>
           })}</div>
           {initialWork && [...completed].filter(platform => !selectedPlatforms.includes(platform)).map(platform =>
-            <p key={platform} className="text-xs text-emerald-700">{platformLabel(platform)}已确认发布</p>)}
+            <p key={platform} className="text-xs text-emerald-700">{platformLabel(platform)}已发布</p>)}
         </section>
         {formError && <p className="rounded bg-red-50 p-3 text-xs text-destructive">{formError}</p>}
       </div>
@@ -275,18 +291,17 @@ function PlatformsPage({ selected, onChange }: { selected: string[]; onChange: (
 }
 
 function TasksPage({ focusedTaskId }: { focusedTaskId: string }) {
-  const { tasks, confirmPublished, cancelTask, setOperationError } = useApp()
+  const { tasks, verifyPublished, cancelTask, setOperationError } = useApp()
   const [selectedId, setSelectedId] = useState(focusedTaskId)
   const [filter, setFilter] = useState("all")
   const visible = tasks.filter(task => filter === "all" || task.status === filter)
   const selected = tasks.find(task => task.id === selectedId) || visible[0]
   const confirm = async (task: TaskRecord) => {
-    if (!window.confirm("确认你已经在抖音页面亲自点击发布，并在抖音后台看到作品？")) return
-    try { await confirmPublished(task.id) } catch (error) { setOperationError(String(error)) }
+    try { await verifyPublished(task.id) } catch (error) { setOperationError(String(error)) }
   }
   return <div className="flex h-full min-h-0 flex-col">
     <SectionHead title="任务" subtitle={`${tasks.length} 条本机记录`} right={<Select value={filter} onValueChange={setFilter}><SelectTrigger className="w-36 bg-white" size="sm"><SelectValue /></SelectTrigger><SelectContent>
-      <SelectItem value="all">全部状态</SelectItem><SelectItem value="queued">等待扩展</SelectItem><SelectItem value="running">填写中</SelectItem><SelectItem value="prepared">待人工发布</SelectItem><SelectItem value="success">已确认发布</SelectItem><SelectItem value="failed">失败</SelectItem><SelectItem value="interrupted">需核对</SelectItem>
+      <SelectItem value="all">全部状态</SelectItem><SelectItem value="queued">等待扩展</SelectItem><SelectItem value="running">填写中</SelectItem><SelectItem value="prepared">待平台发布</SelectItem><SelectItem value="success">已发布</SelectItem><SelectItem value="failed">失败</SelectItem><SelectItem value="interrupted">需核对</SelectItem>
     </SelectContent></Select>} />
     {!tasks.length ? <Empty icon={History} title="暂无发布任务" /> : <div className="grid min-h-0 flex-1 grid-cols-[minmax(280px,38%)_1fr]">
       <div className="tool-scroll min-h-0 border-r border-border bg-white" tabIndex={0}>{visible.map(task => <button type="button" key={task.id} onClick={() => setSelectedId(task.id)}
@@ -294,9 +309,9 @@ function TasksPage({ focusedTaskId }: { focusedTaskId: string }) {
         <span className="min-w-0 flex-1"><span className="block truncate font-medium">{platformLabel(task.platform)} · {task.workTitle || task.action}</span><span className="text-xs text-muted-foreground">{new Date(task.startedAt).toLocaleString()}</span></span><StatusTag status={task.status} /></button>)}</div>
       {selected && <div className="flex min-h-0 flex-col"><div className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-3">
         <div className="min-w-0"><p className="truncate font-medium">{platformLabel(selected.platform)} · {selected.workTitle || selected.action}</p><p className="text-xs text-muted-foreground">{selected.message || "等待状态"}</p></div>
-        <div className="flex shrink-0 gap-2">{selected.status === "prepared" && <Button size="sm" onClick={() => void confirm(selected)}><Check />确认已发布</Button>}
+        <div className="flex shrink-0 gap-2">{!!UPLOAD_PAGES[selected.platform] && ["prepared", "running", "failed", "interrupted"].includes(selected.status) && <Button size="sm" onClick={() => void confirm(selected)}><Check />检验已发布</Button>}
           {["queued", "running", "interrupted"].includes(selected.status) && <Button size="sm" variant="outline" onClick={() => void cancelTask(selected.id).catch(error => setOperationError(String(error)))}><X />停止传输</Button>}
-          <Button size="icon-sm" variant="outline" title="打开抖音后台" onClick={() => void openUrl(CREATOR_PAGES.douyin.url)}><ExternalLink /></Button></div>
+          <Button size="icon-sm" variant="outline" title={`打开${platformLabel(selected.platform)}后台`} onClick={() => void openUrl(CREATOR_PAGES[selected.platform].url)}><ExternalLink /></Button></div>
       </div><pre className="tool-scroll min-h-0 flex-1 whitespace-pre-wrap break-words p-4 font-mono text-xs leading-5" tabIndex={0}>{selected.lines.join("\n") || "暂无日志"}</pre></div>}
     </div>}
   </div>
@@ -313,7 +328,7 @@ function ExtensionPage() {
   const pair = () => {
     if (bridge) void openUrl(bridge.pairUrl).catch(error => setOperationError(`无法打开扩展连接页：${String(error)}`))
   }
-  return <div className="flex h-full min-h-0 flex-col"><SectionHead title="浏览器扩展" subtitle="当前适配 Chrome / Edge 中的抖音创作者中心" />
+  return <div className="flex h-full min-h-0 flex-col"><SectionHead title="浏览器扩展" subtitle="适配 Chrome / Edge 中的抖音、百家号和大鱼号" />
     <div className="tool-scroll min-h-0 flex-1 px-5 py-5" tabIndex={0}><div className="max-w-2xl space-y-5">
       <section className="space-y-3"><h2 className="text-sm font-semibold">安装扩展</h2>
         <ol className="list-inside list-decimal space-y-2 text-sm text-foreground"><li>在默认浏览器地址栏打开 <code className="rounded bg-muted px-1">chrome://extensions</code>（Edge 用 <code className="rounded bg-muted px-1">edge://extensions</code>）。</li>
@@ -323,8 +338,10 @@ function ExtensionPage() {
         <Button size="sm" disabled={!bridge} onClick={pair}><Puzzle />连接扩展</Button>
       </section>
       <section className="space-y-2 border-t border-border pt-4"><h2 className="text-sm font-semibold">浏览器会话</h2>
-        <p className="text-sm text-muted-foreground">登录只发生在你自己的默认浏览器。软件和扩展不保存 Cookie 或密码。扩展连接一次后，在抖音页面点击扩展图标，可选择软件里的作品补齐剩余资料。</p>
-        <div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => void openUrl("https://creator.douyin.com/creator-micro/content/upload").catch(error => setOperationError(String(error)))}><ExternalLink />打开抖音发布页</Button>
+        <p className="text-sm text-muted-foreground">登录只发生在你自己的默认浏览器。软件和扩展不保存 Cookie 或密码。扩展连接一次后，在对应平台页面点击扩展图标，可选择作品补齐剩余资料。</p>
+        <div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => void openUrl(UPLOAD_PAGES.douyin).catch(error => setOperationError(String(error)))}><ExternalLink />打开抖音发布页</Button>
+          <Button size="sm" variant="outline" onClick={() => void openUrl(UPLOAD_PAGES.baijiahao).catch(error => setOperationError(String(error)))}><ExternalLink />打开百家号</Button>
+          <Button size="sm" variant="outline" onClick={() => void openUrl(UPLOAD_PAGES.dayu).catch(error => setOperationError(String(error)))}><ExternalLink />打开大鱼号</Button>
           <Button size="sm" variant="ghost" onClick={() => void reload()}><RefreshCw />刷新连接</Button></div>
       </section>
     </div></div>
@@ -360,6 +377,7 @@ function Shell() {
   const { bridge, loading, tasks, works, activeWorkId, activateWork, updateWorkPlatforms, operationError, setOperationError, storageError } = useApp()
   const [page, setPage] = useState<Page>("works")
   const [reuseWorkId, setReuseWorkId] = useState("")
+  const [editorKey, setEditorKey] = useState("new")
   const [selectedPlatforms, setSelectedPlatforms] = useState(savedPlatforms)
   const [platformsForEditor, setPlatformsForEditor] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -380,7 +398,7 @@ function Shell() {
   return <TooltipProvider><div className="flex h-full flex-col"><TitleBar onSettings={() => setSettingsOpen(true)} />
     <div className="flex min-h-0 flex-1"><aside className="flex w-48 shrink-0 flex-col border-r border-border bg-[#eef2f3] p-2">
       <nav className="space-y-1">{mainPages.map(item => <button key={item.id} type="button" onClick={() => {
-        if (item.id === "publish" && page !== "platforms") { setReuseWorkId(""); setSelectedPlatforms(savedPlatforms()) }
+        if (item.id === "publish" && page !== "platforms") { setReuseWorkId(""); setEditorKey("new"); setSelectedPlatforms(savedPlatforms()) }
         if (item.id === "platforms" && page !== "platforms") {
           setPlatformsForEditor(page === "publish")
           if (page !== "publish") {
@@ -395,13 +413,13 @@ function Shell() {
         {item.id === "tasks" && pending > 0 && <span className="ml-auto rounded bg-primary px-1.5 text-[10px] text-white">{pending}</span>}</button>)}</nav>
       <div className="mt-auto space-y-2 px-2 pb-2"><div className="rounded-md border border-border bg-white p-2"><div className="flex items-center gap-2 text-xs font-medium">
         <span className={`size-1.5 rounded-full ${bridge ? "bg-emerald-600" : "bg-amber-600"}`} />{loading ? "连接中" : bridge ? "浏览器桥接就绪" : "桥接不可用"}</div>
-        <p className="mt-1 text-xs text-muted-foreground">抖音适配 · {pending} 项进行中</p></div><button onClick={() => setAboutOpen(true)} className="flex h-8 w-full items-center gap-2 rounded px-2 text-xs text-muted-foreground hover:bg-white"><CircleHelp className="size-4" />关于作者</button></div>
+        <p className="mt-1 text-xs text-muted-foreground">3 个平台适配 · {pending} 项进行中</p></div><button onClick={() => setAboutOpen(true)} className="flex h-8 w-full items-center gap-2 rounded px-2 text-xs text-muted-foreground hover:bg-white"><CircleHelp className="size-4" />关于作者</button></div>
     </aside><main className="min-w-0 flex-1">
       {(page === "publish" || page === "platforms") && <div className={page === "publish" ? "h-full" : "hidden"}>
-        <PublishPage key={reuseWorkId || "new"} initialWork={works.find(work => work.id === reuseWorkId)} selectedPlatforms={selectedPlatforms}
-          openPlatforms={() => { setPlatformsForEditor(true); setPage("platforms") }} onPublished={() => setPage("works")} /></div>}
-      {page === "works" ? <WorksPage selectedPlatforms={selectedPlatforms} onNew={() => { setReuseWorkId(""); setSelectedPlatforms(savedPlatforms()); setPage("publish") }}
-        onReuse={id => { setReuseWorkId(id); setSelectedPlatforms(works.find(work => work.id === id)?.content.platforms || savedPlatforms()); setPage("publish") }} />
+        <PublishPage key={editorKey} initialWork={works.find(work => work.id === reuseWorkId)} selectedPlatforms={selectedPlatforms}
+          openPlatforms={() => { setPlatformsForEditor(true); setPage("platforms") }} onPublished={id => setReuseWorkId(id)} /></div>}
+      {page === "works" ? <WorksPage selectedPlatforms={selectedPlatforms} onNew={() => { setReuseWorkId(""); setEditorKey("new"); setSelectedPlatforms(savedPlatforms()); setPage("publish") }}
+        onReuse={id => { setReuseWorkId(id); setEditorKey(id); setSelectedPlatforms(works.find(work => work.id === id)?.content.platforms || savedPlatforms()); setPage("publish") }} />
         : page === "platforms" ? <PlatformsPage selected={selectedPlatforms} onChange={changePlatforms} />
         : page === "tasks" ? <TasksPage focusedTaskId="" /> : page === "extension" ? <ExtensionPage /> : null}</main></div>
     {(operationError || storageError) && <div className="flex shrink-0 items-center gap-2 border-t border-red-100 bg-red-50 px-4 py-2 text-xs text-destructive"><CircleAlert className="size-4" /><span className="min-w-0 flex-1 truncate">{operationError || storageError}</span><button title="关闭提示" onClick={() => setOperationError("")}><X className="size-4" /></button></div>}

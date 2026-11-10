@@ -7,7 +7,7 @@ export interface AccountRecord {
   order?: number
 }
 
-export type TaskStatus = "queued" | "running" | "prepared" | "success" | "failed" | "cancelled" | "interrupted"
+export type TaskStatus = "queued" | "running" | "prepared" | "verified" | "success" | "failed" | "cancelled" | "interrupted"
 
 export interface WorkContent {
   title: string
@@ -27,6 +27,7 @@ export interface WorkPublication {
   accountName: string
   publishedAt: string
   values: FormValues
+  evidence?: { recordId: string; recordUrl: string; title: string }
 }
 
 export interface WorkRecord {
@@ -57,6 +58,7 @@ export interface TaskRecord {
   exitCode?: number | null
   lines: string[]
   message?: string
+  evidence?: { recordId: string; recordUrl: string; title: string }
 }
 
 export type FieldValue = string | boolean | string[]

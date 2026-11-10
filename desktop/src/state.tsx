@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import { openUrl } from "@tauri-apps/plugin-opener"
 import { addWorkPublication, getOrCreateWork, loadAllTasks, loadAllWorks, saveTask, saveWorkPlatforms } from "./db"
 import { redact, reportFault } from "./faults"
+import { CREATOR_PAGES, UPLOAD_PAGES } from "./platforms"
 import { bridgeInfo, cancelBrowserTask, createBrowserTask, hashVideoFile, inDesktop, onBrowserTaskStatus, onNativeFault, setActiveBrowserTask, type BridgeInfo, type BrowserTaskInput } from "./native"
 import type { FormValues, TaskRecord, WorkContent, WorkRecord } from "./types"
 
@@ -19,11 +20,13 @@ interface AppModel {
   reload: () => Promise<void>
   prepareWork: (filePath: string, content: WorkContent, expectedHash?: string) => Promise<WorkRecord>
   createTask: (work: WorkRecord, input: Omit<BrowserTaskInput, "id">, openBrowser?: boolean) => Promise<string>
+  resumeTask: (id: string) => Promise<void>
+  refreshTask: (id: string, input: Omit<BrowserTaskInput, "id">) => Promise<void>
+  startManualPlatform: (work: WorkRecord, platform: string) => Promise<void>
   activateWork: (work: WorkRecord, includeDouyin: boolean) => Promise<void>
   deactivateWork: () => Promise<void>
   updateWorkPlatforms: (workId: string, platforms: string[]) => Promise<WorkRecord>
-  confirmManualPublished: (workId: string, platform: string) => Promise<void>
-  confirmPublished: (id: string) => Promise<void>
+  verifyPublished: (id: string) => Promise<void>
   cancelTask: (id: string) => Promise<void>
 }
 
@@ -61,16 +64,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
         inDesktop ? bridgeInfo() : Promise.resolve(null), loadAllTasks(), loadAllWorks(),
       ])
       setBridge(nextBridge)
-      const restored = storedTasks.map(task => firstLoadRef.current && task.status === "running"
+      const restored = storedTasks.map(task => firstLoadRef.current && task.status === "running" && task.action === "upload-video"
         ? { ...task, status: "interrupted" as const, finishedAt: new Date().toISOString(), message: "桌面程序已重启，可在原发布页用扩展继续" }
         : task)
+      const registeredTaskIds = new Set<string>()
       if (nextBridge) {
         for (const task of restored) {
-          if (task.repoRoot !== LOCAL_ROOT || !task.publishValues || ["success", "cancelled"].includes(task.status)) continue
+          if (task.repoRoot !== LOCAL_ROOT || !UPLOAD_PAGES[task.platform] || !task.publishValues || ["success", "cancelled"].includes(task.status)) continue
           const values = task.publishValues
           try {
             await createBrowserTask({
               id: task.id, filePath: String(values.file || ""), title: String(values.title || ""),
+              platform: task.platform,
               description: String(values.desc || ""),
               tags: String(values.tags || "").split(/[,，]/).filter(Boolean),
               declaration: String(values.declaration || ""),
@@ -78,6 +83,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
               thumbnailLandscape: String(values.thumbnail_landscape || ""),
               initialStatus: task.status === "interrupted" ? "failed" : task.status,
             })
+            registeredTaskIds.add(task.id)
           } catch (error) {
             task.status = "interrupted"
             task.message = `原文件不可用，无法在扩展中继续：${String(error)}`
@@ -89,7 +95,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setTasks(restored)
       setWorks(storedWorks)
       const lockedId = localStorage.getItem("active-publish-work")
-      const activeTask = restored.find(task => task.workId === lockedId && task.platform === "douyin"
+      const activeTask = restored.find(task => task.workId === lockedId && registeredTaskIds.has(task.id)
         && !["success", "cancelled"].includes(task.status))
       if (nextBridge) await setActiveBrowserTask(activeTask?.id || null)
       if (lockedId && !storedWorks.some(work => work.id === lockedId)) {
@@ -114,6 +120,27 @@ export function AppProvider({ children }: { children: ReactNode }) {
       onBrowserTaskStatus(payload => {
         const task = taskRef.current.find(item => item.id === payload.taskId)
         if (!task || task.status === "cancelled" || task.status === "success") return
+        if (payload.status === "verified" && payload.evidence && task.workId && task.publishValues) {
+          const evidence = payload.evidence
+          void (async () => {
+            const publishedAt = new Date().toISOString()
+            const work = await addWorkPublication(task.workId!, {
+              taskId: task.id, platform: task.platform, accountName: "浏览器账号", publishedAt,
+              values: task.publishValues!, evidence,
+            })
+            setWorks(previous => [work, ...previous.filter(item => item.id !== work.id)])
+            updateTask(task.id, { status: "success", evidence, finishedAt: publishedAt,
+              message: `已检验发布记录：${evidence.recordId}` })
+            await cancelBrowserTask(task.id)
+          })().catch(error => setOperationError(`保存发布记录失败：${String(error)}`))
+          return
+        }
+        if (payload.status === "check-failed") {
+          updateTask(task.id, { message: redact(payload.message),
+            lines: [...task.lines, `${new Date().toLocaleTimeString()} 检验未通过: ${redact(payload.message)}`].slice(-100) })
+          setOperationError(`检验${task.platform}发布记录失败：${redact(payload.message)}`)
+          return
+        }
         const status = payload.status === "prepared" ? "prepared" : payload.status === "failed" ? "failed" : "running"
         updateTask(payload.taskId, {
           status,
@@ -145,7 +172,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       declaration: input.declaration,
     }
     const task: TaskRecord = {
-      id, repoRoot: LOCAL_ROOT, platform: "douyin", action: "upload-video", workId: work.id,
+      id, repoRoot: LOCAL_ROOT, platform: input.platform, action: "upload-video", workId: work.id,
       workTitle: input.title, publishValues: values, prepareOnly: true,
       status: "queued", startedAt: new Date().toISOString(), lines: [],
       message: "等待浏览器扩展连接",
@@ -161,12 +188,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (launchBrowser) {
         try {
           await openUrl(url)
-          updateTask(id, { message: "作品已准备好，请在抖音页面点击扩展图标自动补齐" })
+          updateTask(id, { message: `作品已准备好，请在${input.platform}页面点击扩展图标自动补齐` })
         } catch (error) {
-          updateTask(id, { message: `作品已准备好，请手动打开抖音创作者中心：${String(error)}` })
+          updateTask(id, { message: `作品已准备好，请手动打开发布页：${String(error)}` })
         }
       } else {
-        updateTask(id, { message: "作品已锁定，可在抖音上传页用扩展自动填写" })
+        updateTask(id, { message: "作品已锁定，可在对应平台上传页用扩展自动填写" })
       }
       return id
     } catch (error) {
@@ -175,21 +202,48 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }
 
-  const activateWork = async (work: WorkRecord, includeDouyin: boolean): Promise<void> => {
-    const pending = taskRef.current.find(task => task.workId === work.id && task.platform === "douyin"
+  const resumeTask = async (id: string): Promise<void> => {
+    if (!bridge) throw new Error("浏览器桥接未就绪")
+    const task = taskRef.current.find(item => item.id === id)
+    if (!task || ["success", "cancelled"].includes(task.status)) throw new Error("找不到可继续的发布任务")
+    await setActiveBrowserTask(id)
+    const url = new URL(bridge.pairUrl)
+    url.hash = new URLSearchParams({ token: new URLSearchParams(url.hash.slice(1)).get("token") || "", task: id }).toString()
+    await openUrl(url.toString())
+  }
+
+  const refreshTask = async (id: string, input: Omit<BrowserTaskInput, "id">): Promise<void> => {
+    const task = taskRef.current.find(item => item.id === id)
+    if (!task || task.platform !== input.platform) throw new Error("找不到当前平台任务")
+    const values: FormValues = { file: input.filePath, title: input.title, desc: input.description,
+      tags: input.tags.join(","), thumbnail_portrait: input.thumbnailPortrait,
+      thumbnail_landscape: input.thumbnailLandscape, declaration: input.declaration }
+    if (JSON.stringify(task.publishValues) === JSON.stringify(values)) return
+    await createBrowserTask({ id, ...input })
+    updateTask(id, { publishValues: values, workTitle: input.title,
+      message: "作品资料已更新；网页已有内容会保留，请在发布前核对" })
+  }
+
+  const startManualPlatform = async (work: WorkRecord, platform: string): Promise<void> => {
+    const page = CREATOR_PAGES[platform]
+    if (!page) throw new Error("未知发布平台")
+    let task = taskRef.current.find(item => item.workId === work.id && item.platform === platform
+      && item.action === "open-platform" && item.status !== "cancelled")
+    if (!task) {
+      task = { id: crypto.randomUUID(), repoRoot: LOCAL_ROOT, platform, action: "open-platform",
+        workId: work.id, workTitle: work.content.title, status: "running", startedAt: new Date().toISOString(),
+        lines: [], message: "已打开平台页面，尚未接入自动填写与发布记录检验" }
+      taskRef.current = [task, ...taskRef.current].slice(0, 200)
+      setTasks(taskRef.current)
+      await saveTask(task)
+    }
+    await openUrl(page.url)
+  }
+
+  const activateWork = async (work: WorkRecord, _includeDouyin: boolean): Promise<void> => {
+    const pending = taskRef.current.find(task => task.workId === work.id && !!UPLOAD_PAGES[task.platform]
       && !["success", "cancelled"].includes(task.status))
-    if (includeDouyin && pending) await setActiveBrowserTask(pending.id)
-    else if (includeDouyin) {
-      const content = work.content
-      const declaration = content.origin === "reprint" ? "内容为转载信息"
-        : content.mark === "ai" ? "内容由AI生成" : content.mark === "opinion" ? "内容为个人观点或见解" : ""
-      await createTask(work, {
-        filePath: work.filePath, title: content.title, description: content.description,
-        tags: content.tags.split(/[,，]/).map(tag => tag.trim().replace(/^#/, "")).filter(Boolean),
-        declaration, thumbnailPortrait: content.thumbnailPortrait,
-        thumbnailLandscape: content.thumbnailLandscape,
-      }, false)
-    } else if (bridge) await setActiveBrowserTask(null)
+    if (bridge) await setActiveBrowserTask(pending?.id || null)
     localStorage.setItem("active-publish-work", work.id)
     setActiveWorkId(work.id)
   }
@@ -206,28 +260,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return work
   }
 
-  const confirmManualPublished = async (workId: string, platform: string): Promise<void> => {
-    if (platform === "douyin") throw new Error("抖音请在任务页确认发布")
-    const current = works.find(work => work.id === workId)
-    if (!current) throw new Error("找不到作品记录")
-    const work = await addWorkPublication(workId, {
-      taskId: crypto.randomUUID(), platform, accountName: "浏览器账号", publishedAt: new Date().toISOString(),
-      values: { title: current.content.title, desc: current.content.description, tags: current.content.tags,
-        thumbnail_portrait: current.content.thumbnailPortrait, thumbnail_landscape: current.content.thumbnailLandscape },
-    })
-    setWorks(previous => [work, ...previous.filter(item => item.id !== work.id)])
-  }
-
-  const confirmPublished = async (id: string): Promise<void> => {
+  const verifyPublished = async (id: string): Promise<void> => {
+    if (!bridge) throw new Error("浏览器桥接未就绪")
     const task = taskRef.current.find(item => item.id === id)
-    if (!task || task.status !== "prepared" || !task.workId || !task.publishValues) throw new Error("只有已填好的任务可以确认发布")
-    const publishedAt = new Date().toISOString()
-    const work = await addWorkPublication(task.workId, {
-      taskId: task.id, platform: task.platform, accountName: "浏览器账号", publishedAt, values: task.publishValues,
-    })
-    setWorks(previous => [work, ...previous.filter(item => item.id !== work.id)])
-    updateTask(id, { status: "success", finishedAt: publishedAt, message: "已由用户确认在抖音发布" })
-    await cancelBrowserTask(id)
+    if (!task || !["prepared", "running", "failed", "interrupted"].includes(task.status)) throw new Error("请先去发布该平台")
+    if (!UPLOAD_PAGES[task.platform]) throw new Error("该平台尚未接入发布记录检验，不能计为已发布")
+    const url = new URL(bridge.pairUrl)
+    url.hash = new URLSearchParams({ token: new URLSearchParams(url.hash.slice(1)).get("token") || "", verify: id }).toString()
+    updateTask(id, { message: "正在浏览器中核对平台发布记录" })
+    await openUrl(url.toString())
   }
 
   const cancelTask = async (id: string): Promise<void> => {
@@ -239,6 +280,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   return <AppContext.Provider value={{
     bridge, tasks, works, activeWorkId, loading, storageError, operationError, setOperationError,
-    reload, prepareWork, createTask, activateWork, deactivateWork, updateWorkPlatforms, confirmManualPublished, confirmPublished, cancelTask,
+    reload, prepareWork, createTask, resumeTask, refreshTask, startManualPlatform, activateWork, deactivateWork, updateWorkPlatforms, verifyPublished, cancelTask,
   }}>{children}</AppContext.Provider>
 }

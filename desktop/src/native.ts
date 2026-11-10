@@ -11,6 +11,7 @@ export interface BridgeInfo {
 
 export interface BrowserTaskInput {
   id: string
+  platform: string
   filePath: string
   title: string
   description: string
@@ -23,8 +24,9 @@ export interface BrowserTaskInput {
 
 export interface BrowserTaskStatus {
   taskId: string
-  status: "opened" | "uploading" | "filling" | "prepared" | "failed"
+  status: "opened" | "uploading" | "filling" | "prepared" | "verified" | "check-failed" | "failed"
   message: string
+  evidence?: { recordId: string; recordUrl: string; title: string }
 }
 
 export async function bridgeInfo(): Promise<BridgeInfo> {
