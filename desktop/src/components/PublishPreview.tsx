@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react"
 import { convertFileSrc } from "@tauri-apps/api/core"
 import { Coins, Heart, MessageCircle, Play, Share2, Star, ThumbsUp } from "lucide-react"
-import { inDesktop } from "../cli"
+import { inDesktop } from "../native"
 import { platformLabel } from "../platforms"
 import { CoverFeedPreview } from "./CoverFeedPreview"
 

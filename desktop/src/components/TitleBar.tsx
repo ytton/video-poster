@@ -2,12 +2,10 @@ import { useEffect, useState } from "react"
 import { getCurrentWindow } from "@tauri-apps/api/window"
 import { Settings, Minus, Square, Copy, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { inDesktop } from "../cli"
-import { useApp } from "../state"
+import { inDesktop } from "../native"
 
 export function TitleBar({ onSettings }: { onSettings: () => void }) {
   const [maximized, setMaximized] = useState(false)
-  const { busy } = useApp()
   useEffect(() => {
     if (!inDesktop) return
     const window = getCurrentWindow()
@@ -16,14 +14,6 @@ export function TitleBar({ onSettings }: { onSettings: () => void }) {
     void window.onResized(() => { void window.isMaximized().then(setMaximized) }).then(fn => { stop = fn })
     return () => stop?.()
   }, [])
-  useEffect(() => {
-    if (!inDesktop) return
-    let stop: (() => void) | undefined
-    void getCurrentWindow().onCloseRequested(event => {
-      if (busy && !window.confirm("发布任务正在执行。关闭窗口将结束任务，仍要退出吗？")) event.preventDefault()
-    }).then(fn => { stop = fn })
-    return () => stop?.()
-  }, [busy])
   const close = () => { if (inDesktop) void getCurrentWindow().close() }
   return <header className="flex h-9 shrink-0 items-center border-b border-border bg-white pl-3 select-none">
     <div className="flex items-center gap-2 text-xs font-semibold text-foreground">

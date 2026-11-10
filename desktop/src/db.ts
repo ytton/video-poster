@@ -57,6 +57,11 @@ export async function loadTasks(repoRoot: string): Promise<TaskRecord[]> {
   return tasks.sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, 200)
 }
 
+export async function loadAllTasks(): Promise<TaskRecord[]> {
+  return (await (await database).getAll("tasks"))
+    .sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, 200)
+}
+
 export async function saveTask(task: TaskRecord): Promise<void> {
   await (await database).put("tasks", task)
 }
@@ -66,10 +71,15 @@ export async function loadWorks(repoRoot: string): Promise<WorkRecord[]> {
   return works.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
 }
 
+export async function loadAllWorks(): Promise<WorkRecord[]> {
+  return (await (await database).getAll("works"))
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+}
+
 export async function getOrCreateWork(repoRoot: string, sha256: string, bytes: number, filePath: string, content: WorkContent): Promise<WorkRecord> {
   const id = `${repoRoot}|${sha256}`
   const transaction = (await database).transaction("works", "readwrite")
-  const existing = await transaction.store.get(id)
+  const existing = (await transaction.store.getAll()).find(item => item.sha256 === sha256)
   const now = new Date().toISOString()
   const work: WorkRecord = existing
     ? { ...existing, filePath, updatedAt: now }

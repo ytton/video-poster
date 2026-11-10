@@ -4,7 +4,7 @@ import { open as chooseFile } from "@tauri-apps/plugin-dialog"
 import { ArrowLeftRight, ImagePlus, ZoomIn, ZoomOut } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
-import { inDesktop, prepareCoverPreview, saveCoverFrame } from "../cli"
+import { inDesktop, prepareCoverPreview, saveCoverFrame } from "../native"
 import { CoverFeedPreview } from "./CoverFeedPreview"
 
 type Orientation = "landscape" | "portrait"

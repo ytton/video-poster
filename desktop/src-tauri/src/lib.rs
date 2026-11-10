@@ -1,36 +1,83 @@
-use serde::Serialize;
-use sha2::{Digest, Sha256};
-use std::{
-    collections::{HashMap, HashSet},
-    fs,
-    io::{Read, Write},
-    path::{Path, PathBuf},
-    process::Stdio,
-    sync::{Arc, Mutex},
+use axum::{
+    body::Body,
+    extract::{Path as RoutePath, State as RouteState},
+    http::{header, HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode},
+    middleware::{self, Next},
+    response::{Html, IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
 };
-use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
-use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::{collections::HashMap, fs, io::{Read, Write}, path::{Path, PathBuf}, sync::{Arc, Mutex}};
+use tauri::{AppHandle, Emitter, Manager, State};
+use tokio_util::io::ReaderStream;
+use uuid::Uuid;
 
-#[derive(Default)]
-struct TaskRegistry {
-    pids: Arc<Mutex<HashMap<String, u32>>>,
-    cancelled: Arc<Mutex<HashSet<String>>>,
+#[derive(Clone)]
+struct BridgeState {
+    port: u16,
+    secret: String,
+    tasks: Arc<Mutex<HashMap<String, BrowserTask>>>,
+    app: AppHandle,
 }
 
-#[derive(Serialize)]
+#[derive(Clone)]
+struct BrowserTask {
+    payload: BrowserPayload,
+    video: PathBuf,
+    portrait: Option<PathBuf>,
+    landscape: Option<PathBuf>,
+}
+
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct RuntimeInfo {
-    ready: bool,
-    root: String,
-    cli_path: String,
+struct BrowserPayload {
+    id: String,
+    title: String,
+    description: String,
+    tags: Vec<String>,
+    declaration: String,
+    video: AssetInfo,
+    portrait: Option<AssetInfo>,
+    landscape: Option<AssetInfo>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AssetInfo {
+    name: String,
+    bytes: u64,
+    mime: String,
+    url: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserTaskInput {
+    id: String,
+    file_path: String,
+    title: String,
+    description: String,
+    tags: Vec<String>,
+    declaration: String,
+    thumbnail_portrait: String,
+    thumbnail_landscape: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserTaskStatus {
+    task_id: String,
+    status: String,
     message: String,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct DetectedAccount {
-    platform: String,
-    name: String,
+struct BridgeInfo {
+    extension_path: String,
+    port: u16,
 }
 
 #[derive(Serialize)]
@@ -41,89 +88,41 @@ struct FileDigest {
     file_path: String,
 }
 
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TaskLine {
-    task_id: String,
-    stream: &'static str,
-    text: String,
+fn validated_file(path: &str, extensions: &[&str]) -> Result<PathBuf, String> {
+    let file = PathBuf::from(path).canonicalize().map_err(|error| format!("找不到文件：{error}"))?;
+    if !file.is_file() { return Err("请选择有效文件".into()); }
+    let extension = file.extension().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase();
+    if !extensions.contains(&extension.as_str()) { return Err(format!("不支持的文件格式：{extension}")); }
+    Ok(file)
 }
 
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TaskFinished {
-    task_id: String,
-    exit_code: Option<i32>,
-    cancelled: bool,
-    message: String,
-}
-
-const PLATFORMS: &[&str] = &[
-    "facebook-page", "xiaohongshu", "baijiahao", "bilibili", "kuaishou",
-    "instagram", "facebook", "tencent", "youtube", "douyin", "alipay",
-    "weibo", "hupu", "dayu", "xueqiu", "zhihu",
-];
-
-fn default_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-fn resolve_root(repo_dir: Option<String>) -> Result<PathBuf, String> {
-    let candidate = repo_dir.filter(|value| !value.trim().is_empty())
-        .map(PathBuf::from).unwrap_or_else(default_root);
-    let root = candidate.canonicalize().map_err(|_| format!("找不到项目目录：{}", candidate.display()))?;
-    if !root.join("pyproject.toml").is_file() || !root.join("sau_cli.py").is_file() {
-        return Err(format!("这不是 social-auto-upload 项目目录：{}", root.display()));
-    }
-    Ok(root)
-}
-
-fn cli_path(root: &Path) -> PathBuf {
-    if cfg!(windows) {
-        root.join(".venv/Scripts/sau.exe")
-    } else {
-        root.join(".venv/bin/sau")
-    }
-}
-
-fn python_path(root: &Path) -> PathBuf {
-    if cfg!(windows) {
-        root.join(".venv/Scripts/python.exe")
-    } else {
-        root.join(".venv/bin/python")
-    }
-}
-
-fn installed_root(repo_dir: Option<String>) -> Result<PathBuf, String> {
-    let root = resolve_root(repo_dir)?;
-    if !cli_path(&root).is_file() || !python_path(&root).is_file() {
-        return Err(format!("项目尚未安装 CLI 虚拟环境：{}", root.display()));
-    }
-    Ok(root)
+fn asset(path: &Path, url: String) -> Result<AssetInfo, String> {
+    let extension = path.extension().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase();
+    let mime = match extension.as_str() {
+        "mp4" => "video/mp4", "mov" => "video/quicktime", "webm" => "video/webm",
+        "mkv" => "video/x-matroska", "avi" => "video/x-msvideo",
+        "jpg" | "jpeg" => "image/jpeg", "png" => "image/png", _ => "application/octet-stream",
+    };
+    Ok(AssetInfo {
+        name: path.file_name().and_then(|value| value.to_str()).unwrap_or("media").to_string(),
+        bytes: fs::metadata(path).map_err(|error| error.to_string())?.len(),
+        mime: mime.into(), url,
+    })
 }
 
 #[tauri::command]
 fn prepare_video_preview(app: AppHandle, path: String) -> Result<String, String> {
-    let requested = PathBuf::from(path);
-    let file = requested.canonicalize().map_err(|error| format!("找不到视频文件：{error}"))?;
-    if !file.is_file() {
-        return Err("请选择视频文件".into());
-    }
-    let extension = file.extension().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase();
-    if !["mp4", "mov", "mkv", "webm", "avi"].contains(&extension.as_str()) {
-        return Err("请选择 MP4、MOV、MKV、WebM 或 AVI 视频文件".into());
-    }
+    let file = validated_file(&path, &["mp4", "mov", "mkv", "webm", "avi"])?;
     app.asset_protocol_scope().allow_file(&file).map_err(|error| format!("无法预览视频：{error}"))?;
-    Ok(requested.display().to_string())
+    Ok(file.display().to_string())
 }
 
 #[tauri::command]
 async fn hash_video_file(path: String) -> Result<FileDigest, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let file_path = PathBuf::from(path).canonicalize().map_err(|error| format!("找不到视频文件：{error}"))?;
+        let file_path = validated_file(&path, &["mp4", "mov", "mkv", "webm", "avi"])?;
         let file = fs::File::open(&file_path).map_err(|error| format!("无法读取视频：{error}"))?;
         let before = file.metadata().map_err(|error| error.to_string())?;
-        if !before.is_file() { return Err("请选择视频文件".into()); }
         let mut reader = std::io::BufReader::new(file);
         let mut hasher = Sha256::new();
         let mut buffer = [0u8; 1024 * 1024];
@@ -144,228 +143,128 @@ async fn hash_video_file(path: String) -> Result<FileDigest, String> {
 
 #[tauri::command]
 fn prepare_cover_preview(app: AppHandle, path: String) -> Result<String, String> {
-    let file = PathBuf::from(&path).canonicalize().map_err(|error| format!("找不到封面图片：{error}"))?;
-    if !file.is_file() {
-        return Err("请选择封面图片".into());
-    }
-    let extension = file.extension().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase();
-    if !["jpg", "jpeg", "png"].contains(&extension.as_str()) {
-        return Err("请选择 JPG 或 PNG 封面图片".into());
-    }
+    let file = validated_file(&path, &["jpg", "jpeg", "png"])?;
     app.asset_protocol_scope().allow_file(&file).map_err(|error| format!("无法预览封面：{error}"))?;
     Ok(file.display().to_string())
 }
 
 #[tauri::command]
 fn save_cover_frame(app: AppHandle, orientation: String, bytes: Vec<u8>) -> Result<String, String> {
-    if !["landscape", "portrait"].contains(&orientation.as_str()) {
-        return Err("封面方向无效".into());
-    }
+    if !["landscape", "portrait"].contains(&orientation.as_str()) { return Err("封面方向无效".into()); }
     if bytes.len() < 4 || bytes.len() > 4_500_000 || !bytes.starts_with(&[0xff, 0xd8, 0xff]) {
         return Err("截帧图片无效或超过 4.5 MB".into());
     }
     let folder = app.path().app_data_dir().map_err(|error| error.to_string())?.join("covers");
     fs::create_dir_all(&folder).map_err(|error| format!("无法建立封面目录：{error}"))?;
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| error.to_string())?.as_nanos();
-    let file = folder.join(format!("frame-{orientation}-{stamp}.jpg"));
+    let file = folder.join(format!("frame-{orientation}-{}.jpg", Uuid::new_v4()));
     fs::write(&file, bytes).map_err(|error| format!("无法保存封面：{error}"))?;
     app.asset_protocol_scope().allow_file(&file).map_err(|error| format!("无法预览封面：{error}"))?;
     Ok(file.display().to_string())
 }
 
-#[tauri::command]
-fn runtime_info(repo_dir: Option<String>) -> RuntimeInfo {
-    let fallback = repo_dir.clone().filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| default_root().display().to_string());
-    match installed_root(repo_dir) {
-        Ok(root) => RuntimeInfo {
-            ready: true,
-            root: root.display().to_string(),
-            cli_path: cli_path(&root).display().to_string(),
-            message: "CLI 已就绪".into(),
-        },
-        Err(message) => RuntimeInfo {
-            ready: false,
-            root: fallback,
-            cli_path: String::new(),
-            message,
-        },
-    }
-}
+const EXTENSION_FILES: &[(&str, &str)] = &[
+    ("manifest.json", include_str!("../../extension/manifest.json")),
+    ("background.js", include_str!("../../extension/background.js")),
+    ("connect.js", include_str!("../../extension/connect.js")),
+    ("douyin.js", include_str!("../../extension/douyin.js")),
+];
 
 #[tauri::command]
-fn list_accounts(repo_dir: Option<String>) -> Result<Vec<DetectedAccount>, String> {
-    let root = installed_root(repo_dir)?;
-    let folder = root.join("cookies");
-    if !folder.is_dir() {
-        return Ok(Vec::new());
-    }
-    let mut result = Vec::new();
-    for entry in fs::read_dir(folder).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        if !entry.file_type().map_err(|error| error.to_string())?.is_file() {
-            continue;
-        }
-        let file_name = entry.file_name().to_string_lossy().to_string();
-        if let Some(stem) = file_name.strip_suffix(".json") {
-            if let Some((platform, name)) = PLATFORMS.iter().find_map(|platform| {
-                stem.strip_prefix(&format!("{platform}_"))
-                    .filter(|name| !name.is_empty())
-                    .map(|name| ((*platform).to_string(), name.to_string()))
-            }) {
-                result.push(DetectedAccount { platform, name });
-            }
+fn bridge_info(app: AppHandle, state: State<'_, BridgeState>) -> Result<BridgeInfo, String> {
+    let folder = app.path().app_data_dir().map_err(|error| error.to_string())?.join("browser-extension");
+    fs::create_dir_all(&folder).map_err(|error| format!("无法建立扩展目录：{error}"))?;
+    for (name, content) in EXTENSION_FILES {
+        let path = folder.join(name);
+        if fs::read_to_string(&path).ok().as_deref() != Some(content) {
+            fs::write(&path, content).map_err(|error| format!("无法写入浏览器扩展：{error}"))?;
         }
     }
-    result.sort_by(|a, b| a.platform.cmp(&b.platform).then(a.name.cmp(&b.name)));
-    Ok(result)
+    Ok(BridgeInfo { extension_path: folder.display().to_string(), port: state.port })
 }
 
 #[tauri::command]
-fn remove_session(repo_dir: Option<String>, platform: String, account: String) -> Result<(), String> {
-    if !PLATFORMS.contains(&platform.as_str()) || account.is_empty()
-        || account.contains(['/', '\\']) || account.contains("..") {
-        return Err("账号名称无效".into());
+fn create_browser_task(state: State<'_, BridgeState>, input: BrowserTaskInput) -> Result<String, String> {
+    if Uuid::parse_str(&input.id).is_err() { return Err("任务编号无效".into()); }
+    if input.title.trim().is_empty() || input.title.chars().count() > 30 { return Err("抖音标题需为 1 到 30 字".into()); }
+    if input.description.chars().count() > 2000 { return Err("简介过长，请缩短后重试".into()); }
+    if !["", "内容为转载信息", "内容由AI生成", "内容为个人观点或见解"].contains(&input.declaration.as_str()) {
+        return Err("抖音声明类型无效".into());
     }
-    let root = installed_root(repo_dir)?;
-    let file = root.join("cookies").join(format!("{platform}_{account}.json"));
-    if file.is_file() { fs::remove_file(file).map_err(|error| error.to_string())?; }
-    Ok(())
-}
-
-#[tauri::command]
-async fn cli_schema(repo_dir: Option<String>) -> Result<serde_json::Value, String> {
-    let root = installed_root(repo_dir)?;
-    let output = tokio::process::Command::new(python_path(&root))
-        .arg("-c").arg(include_str!("../../bridge.py"))
-        .current_dir(&root)
-        .env("PYTHONIOENCODING", "utf-8")
-        .output().await.map_err(|error| error.to_string())?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-    }
-    serde_json::from_slice(&output.stdout).map_err(|error| format!("读取 CLI 参数失败：{error}"))
-}
-
-async fn forward_lines<R: AsyncRead + Unpin>(app: AppHandle, task_id: String, stream: &'static str, reader: R) {
-    let mut lines = BufReader::new(reader).lines();
-    while let Ok(Some(text)) = lines.next_line().await {
-        let _ = app.emit("cli-line", TaskLine { task_id: task_id.clone(), stream, text });
-    }
-}
-
-#[tauri::command]
-async fn start_cli(app: AppHandle, state: State<'_, TaskRegistry>, repo_dir: Option<String>, task_id: String, args: Vec<String>) -> Result<(), String> {
-    if task_id.trim().is_empty() || args.is_empty() {
-        return Err("缺少任务编号或 CLI 参数".into());
-    }
-    let root = installed_root(repo_dir)?;
-    if state.pids.lock().map_err(|_| "任务状态不可用")?.contains_key(&task_id) {
-        return Err("任务编号重复".into());
-    }
-    let mut command = tokio::process::Command::new(cli_path(&root));
-    command.args(&args).current_dir(&root).env("PYTHONIOENCODING", "utf-8")
-        .env("PYTHONUNBUFFERED", "1").stdin(Stdio::null())
-        .stdout(Stdio::piped()).stderr(Stdio::piped());
-    #[cfg(windows)]
-    command.creation_flags(0x0800_0000);
-    let mut child = command.spawn().map_err(|error| format!("无法启动 sau：{error}"))?;
-    let pid = child.id().ok_or("无法获取 CLI 进程编号")?;
-    {
-        let mut pids = state.pids.lock().map_err(|_| "任务状态不可用")?;
-        pids.insert(task_id.clone(), pid);
-    }
-    let stdout = child.stdout.take().ok_or("无法读取 CLI 输出")?;
-    let stderr = child.stderr.take().ok_or("无法读取 CLI 错误输出")?;
-    let pids = state.pids.clone();
-    let cancelled = state.cancelled.clone();
-    tauri::async_runtime::spawn(async move {
-        let out = tauri::async_runtime::spawn(forward_lines(app.clone(), task_id.clone(), "stdout", stdout));
-        let err = tauri::async_runtime::spawn(forward_lines(app.clone(), task_id.clone(), "stderr", stderr));
-        let result = child.wait().await;
-        let _ = out.await;
-        let _ = err.await;
-        if let Ok(mut pids) = pids.lock() { pids.remove(&task_id); }
-        let was_cancelled = cancelled.lock().map(|mut set| set.remove(&task_id)).unwrap_or(false);
-        let (exit_code, message) = match result {
-            Ok(status) => (status.code(), if status.success() { "已完成" } else { "CLI 执行失败" }.to_string()),
-            Err(error) => (None, format!("CLI 进程异常退出：{error}")),
-        };
-        let _ = app.emit("cli-finished", TaskFinished { task_id, exit_code, cancelled: was_cancelled, message });
-    });
-    Ok(())
-}
-
-#[cfg(windows)]
-fn kill_tree(pid: u32) -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
-    let output = std::process::Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .creation_flags(0x0800_0000).output().map_err(|error| error.to_string())?;
-    if output.status.success() { Ok(()) } else {
-        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
-    }
-}
-
-#[cfg(not(windows))]
-fn kill_tree(pid: u32) -> Result<(), String> {
-    let status = std::process::Command::new("kill").args(["-TERM", &pid.to_string()])
-        .status().map_err(|error| error.to_string())?;
-    if status.success() { Ok(()) } else { Err("无法结束任务".into()) }
-}
-
-#[tauri::command]
-fn cancel_cli(state: State<'_, TaskRegistry>, task_id: String) -> Result<(), String> {
-    let pid = state.pids.lock().map_err(|_| "任务状态不可用")?
-        .get(&task_id).copied().ok_or("任务已结束")?;
-    state.cancelled.lock().map_err(|_| "任务状态不可用")?.insert(task_id.clone());
-    kill_tree(pid)
-}
-
-#[tauri::command]
-fn open_bilibili_login(app: AppHandle, state: State<'_, TaskRegistry>, repo_dir: Option<String>, task_id: String, account: String) -> Result<(), String> {
-    if account.trim().is_empty() {
-        return Err("请填写账号别名".into());
-    }
-    let root = installed_root(repo_dir)?;
-    #[cfg(windows)]
-    let mut command = {
-        let mut command = std::process::Command::new("powershell.exe");
-        command.args([
-            "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
-            "$ErrorActionPreference = 'Stop'; try { & $env:SAU_BILI_CLI 'bilibili' 'login' '--account' $env:SAU_BILI_ACCOUNT; $code = $LASTEXITCODE } catch { Write-Host $_; $code = 1 }; if ($code -ne 0) { Write-Host 'B站登录失败，请查看上方错误'; Read-Host '按回车关闭窗口' | Out-Null }; exit $code",
-        ]);
-        command.env("SAU_BILI_CLI", cli_path(&root)).env("SAU_BILI_ACCOUNT", &account);
-        command
+    let video = validated_file(&input.file_path, &["mp4", "mov", "mkv", "webm", "avi"])?;
+    let portrait = if input.thumbnail_portrait.is_empty() { None } else { Some(validated_file(&input.thumbnail_portrait, &["jpg", "jpeg", "png"])?) };
+    let landscape = if input.thumbnail_landscape.is_empty() { None } else { Some(validated_file(&input.thumbnail_landscape, &["jpg", "jpeg", "png"])?) };
+    let base = format!("http://127.0.0.1:{}/api/tasks/{}/media", state.port, input.id);
+    let payload = BrowserPayload {
+        id: input.id.clone(), title: input.title.trim().into(), description: input.description,
+        tags: input.tags.into_iter().map(|value| value.trim().trim_start_matches('#').to_string()).filter(|value| !value.is_empty()).take(20).collect(),
+        declaration: input.declaration,
+        video: asset(&video, format!("{base}/video"))?,
+        portrait: portrait.as_ref().map(|path| asset(path, format!("{base}/portrait"))).transpose()?,
+        landscape: landscape.as_ref().map(|path| asset(path, format!("{base}/landscape"))).transpose()?,
     };
-    #[cfg(not(windows))]
-    let mut command = {
-        let mut command = std::process::Command::new(cli_path(&root));
-        command.args(["bilibili", "login", "--account", &account]);
-        command
-    };
-    command.current_dir(&root).env("PYTHONIOENCODING", "utf-8");
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0000_0010);
-    }
-    let mut child = command.spawn().map_err(|error| format!("无法打开登录终端：{error}"))?;
-    state.pids.lock().map_err(|_| "任务状态不可用")?.insert(task_id.clone(), child.id());
-    let pids = state.pids.clone();
-    let cancelled = state.cancelled.clone();
-    std::thread::spawn(move || {
-        let result = child.wait();
-        if let Ok(mut pids) = pids.lock() { pids.remove(&task_id); }
-        let was_cancelled = cancelled.lock().map(|mut set| set.remove(&task_id)).unwrap_or(false);
-        let (exit_code, message) = match result {
-            Ok(status) => (status.code(), if status.success() { "登录流程已完成" } else { "登录流程未完成" }.to_string()),
-            Err(error) => (None, format!("登录终端异常退出：{error}")),
-        };
-        let _ = app.emit("cli-finished", TaskFinished { task_id, exit_code, cancelled: was_cancelled, message });
-    });
+    let mut tasks = state.tasks.lock().map_err(|_| "任务状态不可用")?;
+    if tasks.contains_key(&input.id) { return Err("任务编号重复".into()); }
+    tasks.insert(input.id.clone(), BrowserTask { payload, video, portrait, landscape });
+    Ok(format!("http://127.0.0.1:{}/connect#task={}&token={}", state.port, input.id, state.secret))
+}
+
+#[tauri::command]
+fn cancel_browser_task(state: State<'_, BridgeState>, task_id: String) -> Result<(), String> {
+    state.tasks.lock().map_err(|_| "任务状态不可用")?.remove(&task_id);
     Ok(())
+}
+
+fn authorized(headers: &HeaderMap, state: &BridgeState) -> bool {
+    headers.get(header::AUTHORIZATION).and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == format!("Bearer {}", state.secret))
+}
+
+async fn cors(request: Request<Body>, next: Next) -> Response {
+    let mut response = if request.method() == Method::OPTIONS { StatusCode::NO_CONTENT.into_response() } else { next.run(request).await };
+    let headers = response.headers_mut();
+    headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+    headers.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, POST, OPTIONS"));
+    headers.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("authorization, content-type"));
+    headers.insert(HeaderName::from_static("access-control-allow-private-network"), HeaderValue::from_static("true"));
+    response
+}
+
+async fn connect_page() -> Html<&'static str> {
+    Html("<!doctype html><html lang=zh-CN><meta charset=utf-8><title>连接视频发布台</title><style>body{font:15px system-ui;margin:15vh auto;max-width:560px;color:#253238}h1{font-size:22px}p{line-height:1.7}</style><h1>正在连接视频发布台扩展</h1><p>如果页面没有跳转，请在当前默认浏览器中安装并启用“视频发布台”扩展，然后重新从桌面程序打开发布页。当前扩展支持 Chrome 和 Edge。</p><p>登录抖音后，扩展会填写视频资料。最终发布由你在抖音页面确认。</p></html>")
+}
+
+async fn get_task(RouteState(state): RouteState<BridgeState>, RoutePath(id): RoutePath<String>, headers: HeaderMap) -> Response {
+    if !authorized(&headers, &state) { return StatusCode::UNAUTHORIZED.into_response(); }
+    let task = state.tasks.lock().ok().and_then(|tasks| tasks.get(&id).cloned());
+    match task { Some(task) => Json(task.payload).into_response(), None => StatusCode::NOT_FOUND.into_response() }
+}
+
+async fn get_media(RouteState(state): RouteState<BridgeState>, RoutePath((id, kind)): RoutePath<(String, String)>, headers: HeaderMap) -> Response {
+    if !authorized(&headers, &state) { return StatusCode::UNAUTHORIZED.into_response(); }
+    let task = state.tasks.lock().ok().and_then(|tasks| tasks.get(&id).cloned());
+    let Some(task) = task else { return StatusCode::NOT_FOUND.into_response(); };
+    let path = match kind.as_str() {
+        "video" => Some(task.video), "portrait" => task.portrait, "landscape" => task.landscape, _ => None,
+    };
+    let Some(path) = path else { return StatusCode::NOT_FOUND.into_response(); };
+    let Ok(file) = tokio::fs::File::open(&path).await else { return StatusCode::NOT_FOUND.into_response(); };
+    let Ok(info) = asset(&path, String::new()) else { return StatusCode::INTERNAL_SERVER_ERROR.into_response(); };
+    let mut response = Body::from_stream(ReaderStream::new(file)).into_response();
+    if let Ok(value) = HeaderValue::from_str(&info.mime) { response.headers_mut().insert(header::CONTENT_TYPE, value); }
+    if let Ok(value) = HeaderValue::from_str(&info.bytes.to_string()) { response.headers_mut().insert(header::CONTENT_LENGTH, value); }
+    response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+async fn set_status(RouteState(state): RouteState<BridgeState>, RoutePath(id): RoutePath<String>, headers: HeaderMap, Json(mut status): Json<BrowserTaskStatus>) -> Response {
+    if !authorized(&headers, &state) { return StatusCode::UNAUTHORIZED.into_response(); }
+    if status.task_id != id || !["opened", "uploading", "filling", "prepared", "failed"].contains(&status.status.as_str()) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    if !state.tasks.lock().is_ok_and(|tasks| tasks.contains_key(&id)) { return StatusCode::NOT_FOUND.into_response(); }
+    status.message = status.message.chars().take(500).collect();
+    let _ = state.app.emit("browser-task-status", status);
+    StatusCode::NO_CONTENT.into_response()
 }
 
 pub fn run() {
@@ -373,8 +272,27 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
-        .manage(TaskRegistry::default())
         .setup(|app| {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+            listener.set_nonblocking(true)?;
+            let state = BridgeState {
+                port: listener.local_addr()?.port(),
+                secret: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
+                tasks: Arc::new(Mutex::new(HashMap::new())),
+                app: app.handle().clone(),
+            };
+            let router = Router::new()
+                .route("/connect", get(connect_page))
+                .route("/api/tasks/{id}", get(get_task))
+                .route("/api/tasks/{id}/media/{kind}", get(get_media))
+                .route("/api/tasks/{id}/status", post(set_status))
+                .layer(middleware::from_fn(cors))
+                .with_state(state.clone());
+            tauri::async_runtime::spawn(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).expect("bridge listener");
+                if let Err(error) = axum::serve(listener, router).await { eprintln!("Browser bridge stopped: {error}"); }
+            });
+            app.manage(state);
             let handle = app.handle().clone();
             let log_file = app.path().app_log_dir().unwrap_or_else(|_| std::env::temp_dir()).join("faults.log");
             std::panic::set_hook(Box::new(move |info| {
@@ -387,15 +305,8 @@ pub fn run() {
             }));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![runtime_info, list_accounts, remove_session, cli_schema, start_cli, cancel_cli, open_bilibili_login, prepare_video_preview, hash_video_file, prepare_cover_preview, save_cover_frame])
+        .invoke_handler(tauri::generate_handler![bridge_info, create_browser_task, cancel_browser_task, prepare_video_preview, hash_video_file, prepare_cover_preview, save_cover_frame])
         .build(tauri::generate_context!())
         .expect("failed to start desktop app");
-    app.run(|handle, event| {
-        if let RunEvent::Exit = event {
-            let state = handle.state::<TaskRegistry>();
-            if let Ok(pids) = state.pids.lock() {
-                for pid in pids.values() { let _ = kill_tree(*pid); }
-            };
-        }
-    });
+    app.run(|_, _| {});
 }

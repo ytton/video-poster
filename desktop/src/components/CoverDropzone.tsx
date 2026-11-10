@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react"
 import { convertFileSrc } from "@tauri-apps/api/core"
 import { getCurrentWindow } from "@tauri-apps/api/window"
 import { ImagePlus, X } from "lucide-react"
-import { inDesktop, prepareCoverPreview } from "../cli"
+import { inDesktop, prepareCoverPreview } from "../native"
 
 const IMAGE_EXTENSIONS = ["jpg", "jpeg", "png"]
 

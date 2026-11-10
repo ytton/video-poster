@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react"
 import { getCurrentWindow } from "@tauri-apps/api/window"
 import { open } from "@tauri-apps/plugin-dialog"
 import { Film, FolderOpen, X } from "lucide-react"
-import { inDesktop, prepareVideoPreview } from "../cli"
+import { inDesktop, prepareVideoPreview } from "../native"
 
 const VIDEO_EXTENSIONS = ["mp4", "mov", "mkv", "webm", "avi"]
 

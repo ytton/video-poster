@@ -37,6 +37,10 @@ test("version 1 records survive the works database upgrade", async () => {
   const works = await loadWorks("repo")
   assert.equal(works.length, 1)
   assert.deepEqual(works[0].publications, [publication])
+
+  const reused = await getOrCreateWork("local-browser", "sha", 123, "new-location.mp4", content)
+  assert.equal(reused.id, first.id)
+  assert.deepEqual(reused.publications, [publication])
 })
 
 test("only a successful video publishing task counts as a publication", () => {
