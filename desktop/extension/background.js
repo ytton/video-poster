@@ -15,6 +15,13 @@ async function bridgeConnection() {
   return bridge
 }
 
+async function announceVersion(bridge) {
+  await bridgeFetch(bridge, "/api/extension/hello", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ version: chrome.runtime.getManifest().version }),
+  })
+}
+
 async function bridgeFetch(bridge, path, options = {}) {
   const response = await fetch(`${bridge.base}${path}`, {
     ...options,
@@ -124,6 +131,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       const bridge = { base: message.base, token: message.token }
       await bridgeFetch(bridge, "/api/tasks")
       await chrome.storage.local.set({ bridge })
+      await announceVersion(bridge)
       if (message.type === "verify") return verifyTask(message.task)
       if (message.task) {
         const payload = await taskPayload(bridge, message.task)
@@ -140,6 +148,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     }
     if (message?.type === "list") {
       const bridge = await bridgeConnection()
+      await announceVersion(bridge)
       const listing = await (await bridgeFetch(bridge, "/api/tasks")).json()
       return { ok: true, tasks: listing.tasks, activeTaskId: listing.activeTaskId }
     }

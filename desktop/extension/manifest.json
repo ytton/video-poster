@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "视频发布台",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "在自己的浏览器中填写抖音、百家号和大鱼号发布页，由用户确认最终发布。",
   "permissions": ["tabs", "storage", "scripting"],
   "host_permissions": ["http://127.0.0.1/*", "https://creator.douyin.com/*", "https://baijiahao.baidu.com/*", "https://mp.dayu.com/*"],

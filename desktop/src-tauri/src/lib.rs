@@ -20,6 +20,7 @@ struct BridgeState {
     secret: String,
     tasks: Arc<Mutex<HashMap<String, BrowserTask>>>,
     active_task_id: Arc<Mutex<Option<String>>>,
+    extension_version: Arc<Mutex<Option<String>>>,
     app: AppHandle,
 }
 
@@ -111,6 +112,12 @@ struct BridgeInfo {
     extension_path: String,
     port: u16,
     pair_url: String,
+    extension_version: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ExtensionHello {
+    version: String,
 }
 
 #[derive(Serialize)]
@@ -226,7 +233,18 @@ fn bridge_info(app: AppHandle, state: State<'_, BridgeState>) -> Result<BridgeIn
         extension_path,
         port: state.port,
         pair_url: format!("http://127.0.0.1:{}/connect#token={}", state.port, state.secret),
+        extension_version: state.extension_version.lock().map_err(|_| "扩展状态不可用")?.clone(),
     })
+}
+
+async fn extension_hello(RouteState(state): RouteState<BridgeState>, headers: HeaderMap, Json(hello): Json<ExtensionHello>) -> Response {
+    if !authorized(&headers, &state) { return StatusCode::UNAUTHORIZED.into_response(); }
+    if hello.version.len() > 32 || !hello.version.chars().all(|ch| ch.is_ascii_digit() || ch == '.') {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let Ok(mut version) = state.extension_version.lock() else { return StatusCode::INTERNAL_SERVER_ERROR.into_response(); };
+    *version = Some(hello.version);
+    StatusCode::NO_CONTENT.into_response()
 }
 
 #[tauri::command]
@@ -382,11 +400,13 @@ pub fn run() {
                 secret,
                 tasks: Arc::new(Mutex::new(HashMap::new())),
                 active_task_id: Arc::new(Mutex::new(None)),
+                extension_version: Arc::new(Mutex::new(None)),
                 app: app.handle().clone(),
             };
             let router = Router::new()
                 .route("/connect", get(connect_page))
                 .route("/api/tasks", get(list_tasks))
+                .route("/api/extension/hello", post(extension_hello))
                 .route("/api/tasks/{id}", get(get_task))
                 .route("/api/tasks/{id}/media/{kind}", get(get_media))
                 .route("/api/tasks/{id}/status", post(set_status))

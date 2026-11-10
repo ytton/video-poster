@@ -2,11 +2,12 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import { openUrl } from "@tauri-apps/plugin-opener"
 import { addWorkPublication, getOrCreateWork, loadAllTasks, loadAllWorks, saveTask, saveWorkPlatforms } from "./db"
 import { redact, reportFault } from "./faults"
-import { CREATOR_PAGES, UPLOAD_PAGES } from "./platforms"
+import { CREATOR_PAGES, platformLabel, UPLOAD_PAGES } from "./platforms"
 import { bridgeInfo, cancelBrowserTask, createBrowserTask, hashVideoFile, inDesktop, onBrowserTaskStatus, onNativeFault, setActiveBrowserTask, type BridgeInfo, type BrowserTaskInput } from "./native"
 import type { FormValues, TaskRecord, WorkContent, WorkRecord } from "./types"
 
 const LOCAL_ROOT = "local-browser"
+const EXTENSION_VERSION = "0.3.1"
 
 interface AppModel {
   bridge: BridgeInfo | null
@@ -187,8 +188,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setActiveWorkId(work.id)
       if (launchBrowser) {
         try {
-          await openUrl(url)
-          updateTask(id, { message: `作品已准备好，请在${input.platform}页面点击扩展图标自动补齐` })
+          const extensionReady = (await bridgeInfo()).extensionVersion === EXTENSION_VERSION
+          await openUrl(extensionReady ? url : UPLOAD_PAGES[input.platform])
+          updateTask(id, { message: extensionReady
+            ? `作品已准备好，请在${platformLabel(input.platform)}页面点击扩展图标自动补齐`
+            : `已打开${platformLabel(input.platform)}发布页。请重新加载浏览器扩展并连接软件后自动补齐` })
+          if (!extensionReady) setOperationError("浏览器扩展尚未连接当前版本；请在扩展管理页重新加载，再到软件“浏览器扩展”页连接")
         } catch (error) {
           updateTask(id, { message: `作品已准备好，请手动打开发布页：${String(error)}` })
         }
@@ -207,9 +212,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const task = taskRef.current.find(item => item.id === id)
     if (!task || ["success", "cancelled"].includes(task.status)) throw new Error("找不到可继续的发布任务")
     await setActiveBrowserTask(id)
-    const url = new URL(bridge.pairUrl)
-    url.hash = new URLSearchParams({ token: new URLSearchParams(url.hash.slice(1)).get("token") || "", task: id }).toString()
-    await openUrl(url.toString())
+    const extensionReady = (await bridgeInfo()).extensionVersion === EXTENSION_VERSION
+    if (extensionReady) {
+      const url = new URL(bridge.pairUrl)
+      url.hash = new URLSearchParams({ token: new URLSearchParams(url.hash.slice(1)).get("token") || "", task: id }).toString()
+      await openUrl(url.toString())
+    } else {
+      await openUrl(UPLOAD_PAGES[task.platform])
+      setOperationError("已打开对应平台。请重新加载浏览器扩展并连接软件；此前已上传的视频请回到原标签页继续")
+    }
   }
 
   const refreshTask = async (id: string, input: Omit<BrowserTaskInput, "id">): Promise<void> => {
@@ -262,6 +273,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const verifyPublished = async (id: string): Promise<void> => {
     if (!bridge) throw new Error("浏览器桥接未就绪")
+    if ((await bridgeInfo()).extensionVersion !== EXTENSION_VERSION) {
+      throw new Error("浏览器扩展版本过旧或尚未连接；请重新加载扩展并在软件的浏览器扩展页连接")
+    }
     const task = taskRef.current.find(item => item.id === id)
     if (!task || !["prepared", "running", "failed", "interrupted"].includes(task.status)) throw new Error("请先去发布该平台")
     if (!UPLOAD_PAGES[task.platform]) throw new Error("该平台尚未接入发布记录检验，不能计为已发布")

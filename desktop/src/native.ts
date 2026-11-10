@@ -7,6 +7,7 @@ export interface BridgeInfo {
   extensionPath: string
   port: number
   pairUrl: string
+  extensionVersion: string | null
 }
 
 export interface BrowserTaskInput {
