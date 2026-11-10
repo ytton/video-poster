@@ -31,6 +31,7 @@
     const root = panel()
     root.querySelector("p").textContent = message
     const button = root.querySelector("button")
+    button.textContent = "补齐剩余内容"
     button.hidden = !retry
     button.onclick = retry ? () => void retryHere() : null
   }

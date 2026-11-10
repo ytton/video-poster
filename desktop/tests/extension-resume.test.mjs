@@ -55,7 +55,7 @@ function loadPage({ title, description, videoReady }) {
   vm.runInContext(source, context)
   currentJob = { task: "task-1", base: "http://127.0.0.1:47653", token: "token", stage: "opened", resume: true }
   return {
-    requests, statuses, completion,
+    requests, statuses, completion, panelButton,
     start: () => listeners[0]({ type: "start" }, null, () => {}),
   }
 }
@@ -76,4 +76,5 @@ test("resume stops when the current page has no recognizable video", async () =>
   assert.deepEqual(page.statuses.map(item => item.status), ["failed"])
   assert.match(page.statuses[0].message, /不会重新上传视频/)
   assert.equal(page.requests.length, 1)
+  assert.equal(page.panelButton.textContent, "补齐剩余内容")
 })
